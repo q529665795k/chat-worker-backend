@@ -1,4 +1,4 @@
-import { createServer } from "http";
+ import { createServer } from "http";
 import { Server } from "socket.io";
 import express from "express";
 import mysql from "mysql2/promise";
