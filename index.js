@@ -263,7 +263,13 @@ export class ChatDO {
     }, KEEP_ALIVE_CHECK_INTERVAL);
   }
 
-  async fetch(request, env, ctx) {
+  // 先在文件顶部定义（如果没有的话）
+const allowOrigins = [
+  "https://www.im6.qzz.io",
+  "https://w.im6.qzz.io"
+];
+
+async fetch(request, env, ctx) {
     await this.initDB();
     await this.loadUsers();
     const url = new URL(request.url);
@@ -275,6 +281,18 @@ export class ChatDO {
       "Access-Control-Allow-Credentials": "true",
       "Access-Control-Max-Age": "86400"
     };
+
+    // 处理跨域预检 OPTIONS 请求
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders
+      });
+    }
+
+    // 下面保留你原来所有的业务逻辑不变
+    // ……你原来的代码继续往下写就行
+
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 200, headers: corsHeaders });
