@@ -28,7 +28,7 @@ class_name = "ChatDO"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["ChatDO"]
+new_classes = ["ChatDO"]
 [observability]
 enabled = false
 head_sampling_rate = 1
