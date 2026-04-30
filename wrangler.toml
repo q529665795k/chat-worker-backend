@@ -2,35 +2,29 @@ name = "tiny-glade-72fa"
 main = "index.js"
 compatibility_date = "2026-04-30"
 
-# D1 数据库
 [[d1_databases]]
 binding = "MY_MMM"
 database_name = "mm"
 database_id = "e5400dde-3ef0-4d6e-ab99-0f686"
 
-# KV 命名空间
 [[kv_namespaces]]
 binding = "bbb"
 id = "075caae527884570bad346b6c3cf5abf"
 
-# 前端 Worker 绑定
 [[services]]
 binding = "nnn"
 service = "wandering-river-7d75"
 environment = "production"
 
-# 文件上传 Worker 绑定
 [[services]]
 binding = "cvvv"
 service = "jolly-disk-5d37"
 environment = "production"
 
-# ==========  Durable Object 核心配置（解决10061报错） ==========
 [[durable_objects.bindings]]
 name = "CHAT_DO"
 class_name = "ChatDO"
 
-# 必须加的迁移声明（让CF识别ChatDO类）
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatDO"]
