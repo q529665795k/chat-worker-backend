@@ -267,6 +267,7 @@ async function globalMatch(env, ctx, sid) {
   }
 }
 
+// ========== 【修复】删除全局定时器里崩溃的globalMatch调用 ==========
 function startKeepAliveCheck() {
   setInterval(() => {
     const now = Date.now();
@@ -280,8 +281,6 @@ function startKeepAliveCheck() {
         keepAliveMap.delete(pid);
         u?.socket?.send(JSON.stringify({ type: 'partner-leave' }));
         p?.socket?.send(JSON.stringify({ type: 'partner-leave' }));
-        if (u) globalMatch(env, null, uid);
-        if (p) globalMatch(env, null, pid);
         sysLog('KEEPALIVE', '心跳超时/对方离线，自动断开', { u: u?.username, p: p?.username });
         return;
       }
