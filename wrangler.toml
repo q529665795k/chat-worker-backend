@@ -1,3 +1,25 @@
 name = "withered-grass-13cb"
 main = "index.js"
-compatibility_date = "2026-04-29"
+compatibility_date = "2026-04-30"
+
+# D1 数据库（代码里用 env.MY_MMM）
+[[d1_databases]]
+binding = "MY_MMM"
+database_name = "mm"
+database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"
+
+# KV 命名空间（代码里用 env.bbb）
+[[kv_namespaces]]
+binding = "bbb"
+id = "075caae527884570bad346b6c3cf5abf"
+
+# 服务绑定（前端 Worker：wandering-river-7d75）
+[[services]]
+binding = "nnn"
+service = "wandering-river-7d75"
+environment = "production"
+# 前端调用主服务（后端）
+[[services]]
+binding = "cvvv"
+service = "jolly-disk-5d37"
+environment = "production"
