@@ -3,11 +3,11 @@ main = "index.js"
 compatibility_date = "2026-04-30"
 
 # ========== D1 数据库（Pages/Git部署必须加preview_database_id） ==========
-[[d1_databases]]
+[d1_databases]
 binding = "MY_MMM"
 database_name = "mm"
-database_id = "e5400dde-3ef0-4d6e-ab99-0f686"
-preview_database_id = "e5400dde-3ef0-4d6e-ab99-0f686"  # 关键！必须和主ID一样
+database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"
+preview_database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"  # 关键！必须和主ID一样
 
 # ========== KV ==========
 [[kv_namespaces]]
