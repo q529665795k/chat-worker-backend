@@ -23,3 +23,7 @@ environment = "production"
 binding = "cvvv"
 service = "jolly-disk-5d37"
 environment = "production"
+# ========== 新增：Durable Object 绑定（解决1101报错的核心！！！） ==========
+[[durable_objects.bindings]]
+name = "CHAT_DO"
+class_name = "ChatDO"
