@@ -522,7 +522,7 @@ export class ChatDO {
       }
     }
 
-    if (url.pathname.startsWith("/upload")) {
+     if (url.pathname.startsWith("/upload")) {
       return env.cvvv.fetch(request);
     }
 
