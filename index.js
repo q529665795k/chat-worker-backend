@@ -533,10 +533,12 @@ export class ChatDO {
 // ========== Worker入口【已彻底修复】 ==========
 export default {
   async fetch(request, env, ctx) {
-    const chatBrain = env.CHAT_DO.get(
+    const obj = env.CHAT_DO.get(
+
       env.CHAT_DO.idFromName("global-chat-brain"),
       { locationHint: "apac" }
     );
-    return chatBrain.fetch(request);
+    return obj.fetch(request);
+
   }
 };
