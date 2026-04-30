@@ -282,13 +282,13 @@ async fetch(request, env, ctx) {
       "Access-Control-Max-Age": "86400"
     };
 
-    // 处理跨域预检 OPTIONS 请求
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: corsHeaders
       });
     }
+
 
     // 下面保留你原来所有的业务逻辑不变
     // ……你原来的代码继续往下写就行
