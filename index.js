@@ -1,7 +1,7 @@
-// ====================== CF Worker 全栈聊天后端（适配D1+KV+前后端绑定） ======================
+// ====================== CF Worker 终极修复版 - 全局KV跨实例匹配 ======================
 // 绑定资源：
 // env.MY_MMM = D1数据库（聊天、用户、日志）
-// env.bbb = KV（在线状态、登录互踢、全局缓存）
+// env.bbb = KV（全局排队池、在线状态、登录互踢、全局缓存）
 // env.nnn = 前端网页
 // env.cvvv = 文件上传桶
 
@@ -15,9 +15,8 @@ const HEARTBEAT_INTERVAL = 300000;
 const HEARTBEAT_TIMEOUT = 3600000;
 const allowOrigins = ["https://im6.qzz.io", "https://www.im6.qzz.io"];
 
-// ========== 全局内存变量（完全沿用你原代码） ==========
+// ========== 全局内存变量（只保留用户会话，排队全交给KV） ==========
 let userMap = new Map();
-let waitingUsers = new Set();
 let loginMap = new Map();
 let userSessionMap = new Map();
 let keepAliveMap = new Map();
@@ -36,7 +35,7 @@ async function dbRun(env, sql, params = []) {
   return await stmt.run();
 }
 
-// ========== KV全局封装（替换原登录内存、互踢） ==========
+// ========== KV全局封装（【核心修改】全局排队池+互踢全靠它） ==========
 async function kvGet(env, key) {
   return await env.bbb.get(key);
 }
@@ -172,7 +171,6 @@ function stopChat(uid, isInitiative = true) {
       pt.isMatched = false;
       pt.socket.send(JSON.stringify({ type: 'partner-leave' }));
       me.roomId && pt.socket.send(JSON.stringify({ type: 'clear-chat-record' }));
-      autoJoinMatchPool(pt.id);
     }
   }
   me.partner = null;
@@ -184,12 +182,11 @@ function stopChat(uid, isInitiative = true) {
     offlineMsgMem.delete(me.username);
     me.roomId = null;
   }
-  autoJoinMatchPool(me.id);
   sysLog('CHAT', '聊天结束', { user: me.username, self: isInitiative });
 }
 function assignAiRobot(sid) {
   const u = userMap.get(sid);
-  if (!u || !u.socket || u.isMatched || !waitingUsers.has(sid)) return;
+  if (!u || !u.socket || u.isMatched) return;
   cleanMatchTimer(sid);
   const aiName = "AI陪伴者";
   const aiId = "ai_bot";
@@ -197,48 +194,79 @@ function assignAiRobot(sid) {
   u.partner = aiId;
   u.isMatched = true;
   u.roomId = rid;
-  waitingUsers.delete(sid);
   keepAliveMap.set(sid, { partnerId: aiId, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
   u.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: aiId, partnerName: aiName, selfId: sid, roomId: rid } }));
   sysLog('MATCH', '匹配AI成功', { user: u.username });
 }
-function autoJoinMatchPool(sid) {
-  const u = userMap.get(sid);
-  if (!u || !u.socket || !u.username || !loginMap.has(u.username) || userSessionMap.get(u.username) !== sid || u.isMatched || waitingUsers.has(sid)) return;
-  waitingUsers.add(sid);
-  const timer = setTimeout(() => assignAiRobot(sid), MATCH_TIMEOUT);
-  userMatchTimer.set(sid, timer);
-  tryMatch();
-}
-function tryMatch() {
-  const list = Array.from(waitingUsers)
-    .map(id => userMap.get(id))
-    .filter(u => u && u.socket && !u.partner && u.username && loginMap.has(u.username) && userSessionMap.get(u.username) === u.id);
-  if (list.length < 2) return;
-  for (let i = 0; i < list.length - 1; i += 2) {
-    const a = list[i];
-    const b = list[i + 1];
-    if (!a || !b || a.id === b.id) continue;
-    cleanMatchTimer(a.id);
-    cleanMatchTimer(b.id);
-    waitingUsers.delete(a.id);
-    waitingUsers.delete(b.id);
-    a.partner = b.id;
-    b.partner = a.id;
-    a.isMatched = true;
-    b.isMatched = true;
-    const rid = createMatchRoom(a.username, b.username);
-    a.roomId = rid;
-    b.roomId = rid;
-    const aNick = loginMap.get(a.username)?.nickname || a.username;
-    const bNick = loginMap.get(b.username)?.nickname || b.username;
-    a.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: b.id, partnerName: bNick, selfId: a.id, roomId: rid } }));
-    b.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: a.id, partnerName: aNick, selfId: b.id, roomId: rid } }));
-    keepAliveMap.set(a.id, { partnerId: b.id, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
-    keepAliveMap.set(b.id, { partnerId: a.id, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
-    sysLog('MATCH', '真人匹配成功', { a: a.username, b: b.username, room: rid });
+
+// ========== 【终极重写】全局KV跨实例匹配核心（根治匹配不上） ==========
+async function globalMatch(env, sid) {
+  const user = userMap.get(sid);
+  if (!user || !user.username) return;
+
+  // 1. 读取全局KV排队池
+  const waitRaw = await kvGet(env, "global_match_wait");
+
+  if (waitRaw) {
+    // ✅ KV里有人排队！跨实例也能读到！直接配对！
+    const waitUser = JSON.parse(waitRaw);
+    const targetSid = waitUser.sid;
+    const targetUser = userMap.get(targetSid);
+
+    // 清空KV排队池
+    await kvDel(env, "global_match_wait");
+
+    // 两边初始化匹配信息
+    cleanMatchTimer(sid);
+    cleanMatchTimer(targetSid);
+
+    user.partner = targetSid;
+    targetUser.partner = sid;
+    user.isMatched = true;
+    targetUser.isMatched = true;
+
+    // 创建房间
+    const rid = createMatchRoom(user.username, targetUser.username);
+    user.roomId = rid;
+    targetUser.roomId = rid;
+
+    // 获取双方昵称
+    const aNick = loginMap.get(user.username)?.nickname || user.username;
+    const bNick = loginMap.get(targetUser.username)?.nickname || targetUser.username;
+
+    // 互相发送匹配成功
+    user.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: targetSid, partnerName: bNick, selfId: sid, roomId: rid } }));
+    targetUser.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: sid, partnerName: aNick, selfId: targetSid, roomId: rid } }));
+
+    // 保活绑定
+    keepAliveMap.set(sid, { partnerId: targetSid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
+    keepAliveMap.set(targetSid, { partnerId: sid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
+
+    sysLog('MATCH', '✅ 跨实例真人匹配成功', { a: user.username, b: targetUser.username, room: rid });
+
+  } else {
+    // ✅ KV里没人排队，我进全局排队池
+    await kvPut(env, "global_match_wait", JSON.stringify({
+      sid: sid,
+      username: user.username
+    }));
+
+    // 15秒没人匹配，自动匹配AI
+    const timer = setTimeout(() => {
+      // 超时前先检查自己还在不在排队池
+      kvGet(env, "global_match_wait").then(w => {
+        if (w && JSON.parse(w).sid === sid) {
+          kvDel(env, "global_match_wait");
+          assignAiRobot(sid);
+        }
+      });
+    }, MATCH_TIMEOUT);
+    userMatchTimer.set(sid, timer);
+
+    sysLog('MATCH', '⏳ 进入全局KV排队池', { user: user.username, sid: sid });
   }
 }
+
 function startKeepAliveCheck() {
   setInterval(() => {
     const now = Date.now();
@@ -252,8 +280,8 @@ function startKeepAliveCheck() {
         keepAliveMap.delete(pid);
         u?.socket?.send(JSON.stringify({ type: 'partner-leave' }));
         p?.socket?.send(JSON.stringify({ type: 'partner-leave' }));
-        if (u) autoJoinMatchPool(uid);
-        if (p) autoJoinMatchPool(pid);
+        if (u) globalMatch(null, uid);
+        if (p) globalMatch(null, pid);
         sysLog('KEEPALIVE', '心跳超时/对方离线，自动断开', { u: u?.username, p: p?.username });
         return;
       }
@@ -324,7 +352,7 @@ async function handleRequest(request, env) {
       }
     }, UNLOGGED_CLEAN_INTERVAL);
 
-    // 消息处理（完全沿用你原逻辑）
+    // 消息处理（完全沿用你原逻辑，只改匹配调用）
     server.addEventListener("message", async (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -343,28 +371,27 @@ async function handleRequest(request, env) {
           // KV互踢：顶掉旧设备（和D1用户完全绑定）
           await kvPut(env, `user_${username}`, sid);
           sysLog('ONLINE', '用户上线', { username, sid });
-          autoJoinMatchPool(sid);
           return;
         }
-        // 发起匹配
+        // 发起匹配【核心修改：调用全局KV匹配】
         if (data.type === "match-chat") {
           if (!user.username) return;
           if (user.isMatched) stopChat(sid, false);
-          waitingUsers.delete(sid);
           cleanMatchTimer(sid);
-          waitingUsers.add(sid);
-          const t = setTimeout(() => assignAiRobot(sid), MATCH_TIMEOUT);
-          userMatchTimer.set(sid, t);
-          sysLog('MATCH', '用户发起匹配', { user: user.username });
-          tryMatch();
+          sysLog('MATCH', '用户发起全局匹配', { user: user.username });
+          await globalMatch(env, sid);
           return;
         }
         // 停止聊天
         if (data.type === "stop-chat") {
           sysLog('MATCH', '用户停止匹配', { user: user.username });
-          waitingUsers.delete(sid);
           cleanMatchTimer(sid);
           stopChat(sid, true);
+          // 退出时清空自己在KV排队池
+          const waitRaw = await kvGet(env, "global_match_wait");
+          if (waitRaw && JSON.parse(waitRaw).sid === sid) {
+            await kvDel(env, "global_match_wait");
+          }
           return;
         }
         // 心跳保活
@@ -437,13 +464,17 @@ async function handleRequest(request, env) {
     });
 
     // 断开连接（KV清理严格匹配D1用户）
-    server.addEventListener("close", () => {
+    server.addEventListener("close", async () => {
       cleanMatchTimer(sid);
-      waitingUsers.delete(sid);
+      // 断开时清空自己在KV排队池
+      const waitRaw = await kvGet(env, "global_match_wait");
+      if (waitRaw && JSON.parse(waitRaw).sid === sid) {
+        await kvDel(env, "global_match_wait");
+      }
       if (user.username) {
         userSessionMap.delete(user.username);
         usernameToSocket.delete(user.username);
-        kvDel(env, `user_${user.username}`);
+        await kvDel(env, `user_${user.username}`);
       }
       keepAliveMap.delete(sid);
       userMap.delete(sid);
