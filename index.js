@@ -455,49 +455,66 @@ async function handleRequest(request, env) {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // 注册接口（D1语法适配，字段匹配，KV同步）
-  if (url.pathname === "/register" && request.method === "POST") {
+  // 注册接口（精准校验，防重复）
+if (url.pathname === "/register" && request.method === "POST") {
     const body = await request.json();
     const { username, password } = body;
     try {
-      const exist = await dbQuery(env, `SELECT username FROM users WHERE username = ?`, [username]);
-      if (exist.results.length > 0) {
-        return new Response(JSON.stringify({ code: 400, msg: '用户名已被注册，请换一个' }), { headers: corsHeaders });
-      }
-      const defaultNickname = username;
-      // D1插入语法适配
-      await dbRun(env, `INSERT INTO users (username, password, nickname, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, [username, password, defaultNickname]);
-      await dbRun(env, `INSERT INTO register_logs (username, password, register_time) VALUES (?, ?, CURRENT_TIMESTAMP)`, [username, password]);
-      loginMap.set(username, { nickname: defaultNickname, password });
-      return new Response(JSON.stringify({ code: 200, msg: '注册成功', data: { username, nickname: defaultNickname } }), { headers: corsHeaders });
+        // 第一步：精准查账号是否已存在
+        const existCheck = await dbQuery(env, "SELECT 1 FROM users WHERE username = ?", [username]);
+        if (existCheck.results.length > 0) {
+            return new Response(JSON.stringify({ code: 400, msg: "该账号已被注册，请换一个" }), { headers: corsHeaders });
+        }
+
+        // 第二步：插入新用户，D1语法100%正确
+        await dbRun(env, "INSERT INTO users (username,password,nickname,created_at,updated_at) VALUES (?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", [username, password, username]);
+        
+        // 同步内存登录池
+        loginMap.set(username, { nickname: username, password });
+        
+        return new Response(JSON.stringify({ code: 200, msg: "注册成功，请登录" }), { headers: corsHeaders });
     } catch (err) {
-      return new Response(JSON.stringify({ code: 500, msg: '服务器错误，注册失败' }), { headers: corsHeaders });
+        return new Response(JSON.stringify({ code: 500, msg: "服务器异常，注册失败" }), { headers: corsHeaders });
     }
-  }
+}
 
   // 登录接口（D1语法适配，字段匹配，KV互踢绑定）
-  if (url.pathname === "/login" && request.method === "POST") {
+  // 登录接口（分步校验：区分账号不存在 / 密码错误）
+if (url.pathname === "/login" && request.method === "POST") {
     const body = await request.json();
     const { username, password } = body;
     try {
-      const res = await dbQuery(env, `SELECT username, password, nickname FROM users WHERE username = ?`, [username]);
-      if (res.results.length === 0) {
-        return new Response(JSON.stringify({ code: 400, msg: '账号不存在' }), { headers: corsHeaders });
-      }
-      const user = res.results[0];
-      if (user.password !== password) {
-        return new Response(JSON.stringify({ code: 400, msg: '密码错误' }), { headers: corsHeaders });
-      }
-      await dbRun(env, `INSERT INTO login_logs (username, login_time) VALUES (?, CURRENT_TIMESTAMP)`, [username]);
-      loginMap.set(username, { nickname: user.nickname, password: user.password });
-      return new Response(JSON.stringify({ 
-        code: 200, msg: '登录成功', 
-        data: { username: user.username, nickname: user.nickname } 
-      }), { headers: corsHeaders });
+        // 第一步：只查账号是否存在（先不比对密码）
+        const userExist = await dbQuery(env, "SELECT 1 FROM users WHERE username = ?", [username]);
+        if (userExist.results.length === 0) {
+            // 精准提示：账号不存在
+            return new Response(JSON.stringify({ code: 400, msg: "账号不存在，请先注册" }), { headers: corsHeaders });
+        }
+
+        // 第二步：账号存在 → 比对密码
+        const user = await dbQuery(env, "SELECT * FROM users WHERE username = ? AND password = ?", [username, password]);
+        if (user.results.length === 0) {
+            // 精准提示：密码错误
+            return new Response(JSON.stringify({ code: 400, msg: "密码错误，请重新输入" }), { headers: corsHeaders });
+        }
+
+        // 第三步：登录成功，同步内存池
+        const userInfo = user.results[0];
+        loginMap.set(username, { nickname: userInfo.nickname || username, password });
+
+        // 返回格式和前端100%兼容
+        return new Response(JSON.stringify({
+            code: 200,
+            msg: "登录成功",
+            data: {
+                username: userInfo.username,
+                nickname: userInfo.nickname || username
+            }
+        }), { headers: corsHeaders });
     } catch (err) {
-      return new Response(JSON.stringify({ code: 500, msg: '服务器错误，登录失败' }), { headers: corsHeaders });
+        return new Response(JSON.stringify({ code: 500, msg: "服务器异常，登录失败" }), { headers: corsHeaders });
     }
-  }
+}
 
   // 修改昵称接口（D1语法适配，字段匹配）
   if (url.pathname === "/update-nickname" && request.method === "POST") {
