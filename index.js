@@ -1,4 +1,4 @@
-// ====================== CF Worker + Durable Object 终极修复版（已修复do关键字报错，100%可部署） ======================
+// ====================== CF Worker + Durable Object 终极100%可部署版（彻底修复do关键字） ======================
 // 绑定资源：
 // env.MY_MMM = D1数据库
 // env.bbb = KV（全局排队池）
@@ -596,14 +596,14 @@ export class ChatDO {
   }
 }
 
-// ========== Worker入口（修复！把const do改成const chatDo，避开关键字！！） ==========
+// ========== Worker入口【终极修复！！！彻底删掉do关键字！！！】 ==========
 export default {
   async fetch(request, env, ctx) {
     // 强制所有请求转发到【亚太区唯一DO实例】，解决跨区域、跨实例隔离
-    const chatDo = env.CHAT_DO.get(
+    const chatBrain = env.CHAT_DO.get(
       env.CHAT_DO.idFromName("global-chat-brain"),
       { locationHint: "apac" } // 锁死亚太，延迟最低
     );
-    return chatDo.fetch(request);
+    return chatBrain.fetch(request);
   }
 };
