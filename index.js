@@ -264,15 +264,17 @@ export class ChatDO {
   }
 
   // 先在文件顶部定义（如果没有的话）
-const allowOrigins = [
-  "https://www.im6.qzz.io",
-  "https://w.im6.qzz.io"
-];
-
 async fetch(request, env, ctx) {
     await this.initDB();
     await this.loadUsers();
     const url = new URL(request.url);
+    
+    // 白名单写在方法内部，绝对不会报语法错
+    const allowOrigins = [
+      "https://www.im6.qzz.io",
+      "https://w.im6.qzz.io"
+    ];
+    
     const origin = request.headers.get('origin') || "";
     const corsHeaders = {
       "Access-Control-Allow-Origin": allowOrigins.includes(origin) ? origin : "",
@@ -288,6 +290,9 @@ async fetch(request, env, ctx) {
         headers: corsHeaders
       });
     }
+
+    // ========== 下面你原来所有的代码，一丝不动保留 ==========
+
 
 
     // 下面保留你原来所有的业务逻辑不变
