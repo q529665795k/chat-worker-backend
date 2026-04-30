@@ -319,9 +319,8 @@ async function handleRequest(request, env, ctx) {
     return new Response('😎 你来啦，Worker服务稳稳在线～', { headers: corsHeaders });
   }
 
-  // WebSocket聊天核心
-  if (url.pathname.startsWith("/socket.io") ) {
- 
+  // WebSocket聊天核心（✅ 已修复多余大括号）
+  if (url.pathname.startsWith("/socket.io")) {
     const upgradeHeader = request.headers.get("Upgrade");
     if (!upgradeHeader || upgradeHeader !== "websocket") {
       return new Response("Expected Upgrade: websocket", { status: 400 });
