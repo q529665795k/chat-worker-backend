@@ -1,4 +1,4 @@
-// ====================== CF Worker + Durable Object 终极100%可部署版（彻底修复do关键字） ======================
+// ====================== CF Worker + Durable Object 终极纯净版（无任何do关键字） ======================
 // 绑定资源：
 // env.MY_MMM = D1数据库
 // env.bbb = KV（全局排队池）
@@ -6,7 +6,7 @@
 // env.cvvv = 文件上传桶
 // env.CHAT_DO = Durable Object（绑定下面 ChatDO 类）
 
-// ========== 全局配置常量（完全沿用你的，一丝不动） ==========
+// ========== 全局配置常量 ==========
 const KEEP_ALIVE_EXPIRE = 24 * 60 * 60 * 1000;
 const KEEP_ALIVE_CHECK_INTERVAL = 60 * 1000;
 const UNLOGGED_CLEAN_INTERVAL = 30000;
@@ -16,12 +16,11 @@ const HEARTBEAT_INTERVAL = 300000;
 const HEARTBEAT_TIMEOUT = 3600000;
 const allowOrigins = ["https://im6.qzz.io", "https://www.im6.qzz.io"];
 
-// ========== Durable Object：唯一全局大脑（所有内存、逻辑全放这里，跨Worker全局共享） ==========
+// ========== Durable Object：全局唯一大脑 ==========
 export class ChatDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    // 【关键】所有内存变量，全部放在 DO 里，全局唯一！
     this.userMap = new Map();
     this.loginMap = new Map();
     this.userSessionMap = new Map();
@@ -30,12 +29,9 @@ export class ChatDO {
     this.roomMem = new Map();
     this.offlineMsgMem = new Map();
     this.usernameToSocket = new Map();
-
-    // 启动全局定时器（DO 里启动，只跑一次）
     this.startKeepAliveCheck();
   }
 
-  // ========== D1数据库通用封装（完全沿用你的） ==========
   async dbQuery(sql, params = []) {
     const stmt = this.env.MY_MMM.prepare(sql).bind(...params);
     return await stmt.all();
@@ -45,7 +41,6 @@ export class ChatDO {
     return await stmt.run();
   }
 
-  // ========== 日志系统 ==========
   sysLog(tag, msg, data = {}) {
     const t = new Date().toLocaleString('zh-CN');
     let logStr = `[${t}] [${tag}] ${msg}`;
@@ -53,7 +48,6 @@ export class ChatDO {
     console.log(logStr);
   }
 
-  // ========== AI调用（完全沿用你的） ==========
   async callAI(prompt) {
     try {
       const res = await fetch("https://useavnmd-mm.hf.space/api/chat", {
@@ -74,7 +68,6 @@ export class ChatDO {
     }
   }
 
-  // ========== 数据库初始化 ==========
   async initDB() {
     try {
       await this.dbRun(`
@@ -125,7 +118,6 @@ export class ChatDO {
     }
   }
 
-  // ========== 用户加载 ==========
   async loadUsers() {
     try {
       const res = await this.dbQuery('SELECT username,nickname,password FROM users');
@@ -137,7 +129,6 @@ export class ChatDO {
     } catch (e) { this.sysLog('USER', '加载失败', { err: e.message }); }
   }
 
-  // ========== 聊天工具函数（完全沿用你的，只改this指向） ==========
   createMatchRoom(userA, userB) {
     const roomId = `room_${Date.now()}_${Math.floor(Math.random()*10000)}`;
     this.roomMem.set(roomId, { userA, userB, userALeft: false, userBLeft: false, createTime: Date.now() });
@@ -198,41 +189,29 @@ export class ChatDO {
     this.sysLog('MATCH', '匹配AI成功', { user: u.username });
   }
 
-  // ========== 全局KV跨实例匹配核心（完全沿用你的，只改this指向） ==========
   async globalMatch(env, ctx, sid) {
     const user = this.userMap.get(sid);
     if (!user || !user.username) {
       console.log("❌ 用户信息异常，终止匹配");
       return;
     }
-
-    console.log("🔍 开始匹配，准备读取KV");
     let waitRaw = await env.bbb.get("global_match_wait");
-    console.log("📖 KV读取结果：", waitRaw);
-
     if (waitRaw) {
       const waitUser = JSON.parse(waitRaw);
       const targetSid = waitUser.sid;
       const targetUser = this.userMap.get(targetSid);
-      console.log("✅ 找到排队用户：", targetSid);
-
       ctx.waitUntil(env.bbb.delete("global_match_wait"));
-      console.log("🗑️ 已清空排队池");
-
       this.cleanMatchTimer(sid);
       this.cleanMatchTimer(targetSid);
       user.partner = targetSid;
       targetUser.partner = sid;
       user.isMatched = true;
       targetUser.isMatched = true;
-
       const rid = this.createMatchRoom(user.username, targetUser.username);
       user.roomId = rid;
       targetUser.roomId = rid;
-
       const aNick = this.loginMap.get(user.username)?.nickname || user.username;
       const bNick = this.loginMap.get(targetUser.username)?.nickname || targetUser.username;
-
       user.socket.send(JSON.stringify({
         type: "match-found",
         data: { roomId: rid, partnerId: targetSid, partnerName: bNick }
@@ -241,25 +220,15 @@ export class ChatDO {
         type: "match-found",
         data: { roomId: rid, partnerId: sid, partnerName: aNick }
       }));
-
       this.keepAliveMap.set(sid, { partnerId: targetSid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
       this.keepAliveMap.set(targetSid, { partnerId: sid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
-
-      console.log("🎉 跨实例匹配成功！", user.username, "↔", targetUser.username);
-
     } else {
-      const waitData = JSON.stringify({
-        sid: sid,
-        username: user.username
-      });
+      const waitData = JSON.stringify({ sid: sid, username: user.username });
       ctx.waitUntil(env.bbb.put("global_match_wait", waitData));
-      console.log("✍️ 已写入KV排队池：", waitData);
-
       const timer = setTimeout(async () => {
         const w = await env.bbb.get("global_match_wait");
         if (w && JSON.parse(w).sid === sid) {
           ctx.waitUntil(env.bbb.delete("global_match_wait"));
-          console.log("⏰ 超时，自动匹配AI");
           this.assignAiRobot(sid);
         }
       }, MATCH_TIMEOUT);
@@ -267,7 +236,6 @@ export class ChatDO {
     }
   }
 
-  // ========== 心跳保活（DO全局唯一定时器） ==========
   startKeepAliveCheck() {
     setInterval(() => {
       const now = Date.now();
@@ -281,7 +249,7 @@ export class ChatDO {
           this.keepAliveMap.delete(pid);
           u?.socket?.send(JSON.stringify({ type: 'partner-leave' }));
           p?.socket?.send(JSON.stringify({ type: 'partner-leave' }));
-          this.sysLog('KEEPALIVE', '心跳超时/对方离线，自动断开', { u: u?.username, p: p?.username });
+          this.sysLog('KEEPALIVE', '心跳超时断开', { u: u?.username, p: p?.username });
           return;
         }
         if (now > val.expireTime) {
@@ -289,19 +257,14 @@ export class ChatDO {
           this.stopChat(pid, false);
           this.keepAliveMap.delete(uid);
           this.keepAliveMap.delete(pid);
-          this.sysLog('KEEPALIVE', '保活过期', { u: u.username, p: p.username });
-          return;
         }
       });
     }, KEEP_ALIVE_CHECK_INTERVAL);
   }
 
-  // ========== 核心入口：接收所有请求（WebSocket、HTTP全在这里处理） ==========
   async fetch(request, env, ctx) {
-    // 初始化（DO启动只跑一次）
     await this.initDB();
     await this.loadUsers();
-
     const url = new URL(request.url);
     const origin = request.headers.get('origin') || "";
     const corsHeaders = {
@@ -311,60 +274,32 @@ export class ChatDO {
       "Access-Control-Allow-Credentials": "true",
       "Access-Control-Max-Age": "86400"
     };
+    if (request.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
+    if (url.pathname === "/") return new Response('😎 DO服务在线', { headers: corsHeaders });
 
-    // OPTIONS预检
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 200, headers: corsHeaders });
-    }
-
-    // 首页
-    if (url.pathname === "/") {
-      return new Response('😎 DO全局大脑服务稳稳在线～', { headers: corsHeaders });
-    }
-
-    // WebSocket聊天核心（完全沿用你的逻辑，只改this指向）
     if (url.pathname.startsWith("/socket.io")) {
       const upgradeHeader = request.headers.get("Upgrade");
-      if (!upgradeHeader || upgradeHeader !== "websocket") {
-        return new Response("Expected Upgrade: websocket", { status: 400 });
-      }
+      if (!upgradeHeader || upgradeHeader !== "websocket") return new Response("Expected Upgrade: websocket", { status: 400 });
       const webSocketPair = new WebSocketPair();
       const [client, server] = Object.values(webSocketPair);
       server.accept();
       const sid = Math.random().toString(36).slice(2);
-      const user = {
-        id: sid, socket: server, username:'', partner:null, isMatched:false,
-        lastActive:Date.now(), lastKeepAlive:Date.now(), roomId:null
-      };
+      const user = { id: sid, socket: server, username:'', partner:null, isMatched:false, lastActive:Date.now(), lastKeepAlive:Date.now(), roomId:null };
       this.userMap.set(sid, user);
-      this.sysLog('CONNECT', '客户端连接', { sid });
-
-      // 45秒心跳防CF断开
-      const heartBeatTimer = setInterval(() => {
-        server.send(JSON.stringify({ type: 'ping' }));
-      }, 45000);
-
-      // 未登录超时清理
+      const heartBeatTimer = setInterval(() => server.send(JSON.stringify({ type: 'ping' })), 45000);
       const unloginTimer = setInterval(() => {
         if (!user.username || !this.loginMap.has(user.username) || this.userSessionMap.get(user.username) !== sid) {
           server.close();
           this.userMap.delete(sid);
           clearInterval(unloginTimer);
           clearInterval(heartBeatTimer);
-          this.sysLog('CONNECT', '未登录超时清理', { sid });
         }
       }, UNLOGGED_CLEAN_INTERVAL);
 
-      // 消息处理（完全沿用你的）
       server.addEventListener("message", async (event) => {
         try {
           const data = JSON.parse(event.data);
-          // 心跳回复
-          if (data.type === "ping") {
-            server.send(JSON.stringify({ type: "pong" }));
-            return;
-          }
-          // 用户上线
+          if (data.type === "ping") { server.send(JSON.stringify({ type: "pong" })); return; }
           if (data.type === "user-online") {
             const { username } = data;
             if (!username || !this.loginMap.has(username)) return;
@@ -372,30 +307,22 @@ export class ChatDO {
             this.userSessionMap.set(username, sid);
             this.usernameToSocket.set(username, server);
             ctx.waitUntil(env.bbb.put(`user_${username}`, sid));
-            this.sysLog('ONLINE', '用户上线', { username, sid });
             return;
           }
-          // 发起匹配
           if (data.type === "match-chat") {
             if (!user.username) return;
             if (user.isMatched) this.stopChat(sid, false);
             this.cleanMatchTimer(sid);
-            this.sysLog('MATCH', '用户发起全局匹配', { user: user.username });
             await this.globalMatch(env, ctx, sid);
             return;
           }
-          // 停止聊天
           if (data.type === "stop-chat") {
-            this.sysLog('MATCH', '用户停止匹配', { user: user.username });
             this.cleanMatchTimer(sid);
             this.stopChat(sid, true);
             const waitRaw = await env.bbb.get("global_match_wait");
-            if (waitRaw && JSON.parse(waitRaw).sid === sid) {
-              ctx.waitUntil(env.bbb.delete("global_match_wait"));
-            }
+            if (waitRaw && JSON.parse(waitRaw).sid === sid) ctx.waitUntil(env.bbb.delete("global_match_wait"));
             return;
           }
-          // 心跳保活
           if (data.type === "HEARTBEAT") {
             if (!user.username) return;
             user.lastKeepAlive = Date.now();
@@ -403,74 +330,46 @@ export class ChatDO {
             server.send(JSON.stringify({ type: 'HEARTBEAT-ACK' }));
             return;
           }
-          // 清空聊天
           if (data.type === "clear-chat") {
             if (user.username) await this.dbRun("DELETE FROM messages WHERE sender=? OR receiver=?", [user.username, user.username]);
             server.send(JSON.stringify({ type: 'clear-chat-record' }));
             return;
           }
-          // 发送消息
           if (data.type === "send-msg") {
             if (!user.username || !user.isMatched || !user.partner) return;
             const to = this.userMap.get(user.partner);
             const fromNick = this.loginMap.get(user.username)?.nickname || user.username;
-            
-            // AI回复逻辑
             if (user.partner === 'ai_bot' && data.data.type === 'text') {
               const reply = await this.callAI(data.data.content);
               setTimeout(() => {
                 server.send(JSON.stringify({
                   type: 'new-msg',
-                  data: {
-                    content: reply,
-                    type: 'text',
-                    burn: false,
-                    msgId: Date.now().toString(),
-                    fromName: 'AI陪伴者'
-                  }
+                  data: { content: reply, type: 'text', burn: false, msgId: Date.now().toString(), fromName: 'AI陪伴者' }
                 }));
               }, 600);
               return;
             }
-            
-            // 真人转发
             if (to && to.socket) {
-              await this.dbRun("INSERT INTO messages (sender,receiver,content,msg_type) VALUES (?,?,?,?)", [
-                user.username, to.username, data.data.content, data.data.type || 'text'
-              ]);
+              await this.dbRun("INSERT INTO messages (sender,receiver,content,msg_type) VALUES (?,?,?,?)", [user.username, to.username, data.data.content, data.data.type || 'text']);
               to.socket.send(JSON.stringify({
                 type: 'new-msg',
-                data: {
-                  content: data.data.content,
-                  type: data.data.type || 'text',
-                  burn: data.data.burn || false,
-                  msgId: data.data.msgId || '',
-                  fromName: fromNick
-                }
+                data: { content: data.data.content, type: data.data.type || 'text', burn: data.data.burn || false, msgId: data.data.msgId || '', fromName: fromNick }
               }));
             }
             return;
           }
-          // 已读
           if (data.type === "msg-read") {
             const p = this.userMap.get(user.partner);
-            if (p && p.socket) {
-              p.socket.send(JSON.stringify({ type: 'msg-read', data: { msgId: data.data.msgId } }));
-            }
+            if (p && p.socket) p.socket.send(JSON.stringify({ type: 'msg-read', data: { msgId: data.data.msgId } }));
             return;
           }
-        } catch (err) {
-          console.error('[WS-MSG] 处理失败：', err);
-        }
+        } catch (err) { console.error('[WS-MSG]', err); }
       });
 
-      // 断开连接
       server.addEventListener("close", async () => {
         this.cleanMatchTimer(sid);
         const waitRaw = await env.bbb.get("global_match_wait");
-        if (waitRaw && JSON.parse(waitRaw).sid === sid) {
-          ctx.waitUntil(env.bbb.delete("global_match_wait"));
-        }
+        if (waitRaw && JSON.parse(waitRaw).sid === sid) ctx.waitUntil(env.bbb.delete("global_match_wait"));
         if (user.username) {
           this.userSessionMap.delete(user.username);
           this.usernameToSocket.delete(user.username);
@@ -480,102 +379,70 @@ export class ChatDO {
         this.userMap.delete(sid);
         clearInterval(unloginTimer);
         clearInterval(heartBeatTimer);
-        this.sysLog('DISCONNECT', '客户端断开', { sid, user: user.username });
       });
-
       return new Response(null, { status: 101, webSocket: client });
     }
 
-    // 注册接口
     if (url.pathname === "/register" && request.method === "POST") {
       const body = await request.json();
       const { username, password } = body;
       try {
-          const existCheck = await this.dbQuery("SELECT 1 FROM users WHERE username = ?", [username]);
-          if (existCheck.results.length > 0) {
-              return new Response(JSON.stringify({ code: 400, msg: "该账号已被注册，请换一个" }), { headers: corsHeaders });
-          }
-          await this.dbRun("INSERT INTO users (username,password,nickname,created_at,updated_at) VALUES (?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", [username, password, username]);
-          this.loginMap.set(username, { nickname: username, password });
-          return new Response(JSON.stringify({ code: 200, msg: "注册成功，请登录" }), { headers: corsHeaders });
+        const existCheck = await this.dbQuery("SELECT 1 FROM users WHERE username = ?", [username]);
+        if (existCheck.results.length > 0) return new Response(JSON.stringify({ code: 400, msg: "账号已注册" }), { headers: corsHeaders });
+        await this.dbRun("INSERT INTO users (username,password,nickname) VALUES (?,?,?)", [username, password, username]);
+        this.loginMap.set(username, { nickname: username, password });
+        return new Response(JSON.stringify({ code: 200, msg: "注册成功" }), { headers: corsHeaders });
       } catch (err) {
-          return new Response(JSON.stringify({ code: 500, msg: "服务器异常，注册失败" }), { headers: corsHeaders });
+        return new Response(JSON.stringify({ code: 500, msg: "注册失败" }), { headers: corsHeaders });
       }
     }
 
-    // 登录接口
     if (url.pathname === "/login" && request.method === "POST") {
       const body = await request.json();
       const { username, password } = body;
       try {
-          const userExist = await this.dbQuery("SELECT 1 FROM users WHERE username = ?", [username]);
-          if (userExist.results.length === 0) {
-              return new Response(JSON.stringify({ code: 400, msg: "账号不存在，请先注册" }), { headers: corsHeaders });
-          }
-          const user = await this.dbQuery("SELECT * FROM users WHERE username = ? AND password = ?", [username, password]);
-          if (user.results.length === 0) {
-              return new Response(JSON.stringify({ code: 400, msg: "密码错误，请重新输入" }), { headers: corsHeaders });
-          }
-          const userInfo = user.results[0];
-          this.loginMap.set(username, { nickname: userInfo.nickname || username, password });
-          return new Response(JSON.stringify({
-              code: 200,
-              msg: "登录成功",
-              data: {
-                  username: userInfo.username,
-                  nickname: userInfo.nickname || username
-              }
-          }), { headers: corsHeaders });
+        const userExist = await this.dbQuery("SELECT 1 FROM users WHERE username = ?", [username]);
+        if (userExist.results.length === 0) return new Response(JSON.stringify({ code: 400, msg: "账号不存在" }), { headers: corsHeaders });
+        const user = await this.dbQuery("SELECT * FROM users WHERE username = ? AND password = ?", [username, password]);
+        if (user.results.length === 0) return new Response(JSON.stringify({ code: 400, msg: "密码错误" }), { headers: corsHeaders });
+        const userInfo = user.results[0];
+        this.loginMap.set(username, { nickname: userInfo.nickname || username, password });
+        return new Response(JSON.stringify({ code: 200, msg: "登录成功", data: { username: userInfo.username, nickname: userInfo.nickname || username } }), { headers: corsHeaders });
       } catch (err) {
-          return new Response(JSON.stringify({ code: 500, msg: "服务器异常，登录失败" }), { headers: corsHeaders });
+        return new Response(JSON.stringify({ code: 500, msg: "登录失败" }), { headers: corsHeaders });
       }
     }
 
-    // 修改昵称接口
     if (url.pathname === "/update-nickname" && request.method === "POST") {
       const body = await request.json();
       const { username, newNickname } = body;
       try {
         const nickRepeat = await this.dbQuery(`SELECT username FROM users WHERE nickname = ? AND username != ?`, [newNickname, username]);
-        if (nickRepeat.results.length > 0) {
-          return new Response(JSON.stringify({ code: 400, msg: '昵称已被占用，请换一个' }), { headers: corsHeaders });
-        }
+        if (nickRepeat.results.length > 0) return new Response(JSON.stringify({ code: 400, msg: '昵称已被占用' }), { headers: corsHeaders });
         const userInfo = await this.dbQuery(`SELECT nickname FROM users WHERE username = ?`, [username]);
-        if (userInfo.results.length === 0) {
-          return new Response(JSON.stringify({ code: 400, msg: '用户不存在' }), { headers: corsHeaders });
-        }
+        if (userInfo.results.length === 0) return new Response(JSON.stringify({ code: 400, msg: '用户不存在' }), { headers: corsHeaders });
         const oldNickname = userInfo.results[0].nickname;
-        if (oldNickname === newNickname) {
-          return new Response(JSON.stringify({ code: 200, msg: '昵称未发生变化' }), { headers: corsHeaders });
-        }
-        await this.dbRun(`UPDATE users SET nickname = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`, [newNickname, username]);
-        await this.dbRun(`INSERT INTO nickname_logs (username, old_nickname, new_nickname, create_time) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`, [username, oldNickname, newNickname]);
-        if (this.loginMap.has(username)) {
-          this.loginMap.set(username, { ...this.loginMap.get(username), nickname: newNickname });
-        }
-        return new Response(JSON.stringify({ code: 200, msg: '昵称修改成功', data: { username, oldNickname, newNickname } }), { headers: corsHeaders });
+        if (oldNickname === newNickname) return new Response(JSON.stringify({ code: 200, msg: '昵称未变' }), { headers: corsHeaders });
+        await this.dbRun(`UPDATE users SET nickname = ? WHERE username = ?`, [newNickname, username]);
+        await this.dbRun(`INSERT INTO nickname_logs (username, old_nickname, new_nickname) VALUES (?, ?, ?)`, [username, oldNickname, newNickname]);
+        if (this.loginMap.has(username)) this.loginMap.set(username, { ...this.loginMap.get(username), nickname: newNickname });
+        return new Response(JSON.stringify({ code: 200, msg: '修改成功' }), { headers: corsHeaders });
       } catch (err) {
-        return new Response(JSON.stringify({ code: 500, msg: '服务器错误，修改失败' }), { headers: corsHeaders });
+        return new Response(JSON.stringify({ code: 500, msg: '修改失败' }), { headers: corsHeaders });
       }
     }
 
-    // 在线用户接口
     if (url.pathname === "/api/onlineUser") {
       const onlineList = [];
       this.userMap.forEach(item => {
         if (item.username && this.loginMap.has(item.username)) {
           const info = this.loginMap.get(item.username);
-          onlineList.push({
-            username: item.username,
-            nickname: info.nickname || item.username,
-            isMatched: item.isMatched ? "已匹配" : "空闲中"
-          });
+          onlineList.push({ username: item.username, nickname: info.nickname || item.username, isMatched: item.isMatched ? "已匹配" : "空闲" });
         }
       });
       return new Response(JSON.stringify({ code: 200, total: onlineList.length, list: onlineList }), { headers: corsHeaders });
     }
 
-    // 清空聊天接口
     if (url.pathname === "/api/clearChatOnly" && request.method === "POST") {
       try {
         await this.dbRun("DELETE FROM messages");
@@ -586,24 +453,19 @@ export class ChatDO {
       }
     }
 
-    // 文件上传接口
-    if (url.pathname.startsWith("/upload")) {
-      return env.cvvv.fetch(request);
-    }
-
-    // 其他所有请求 → 返回前端网页
+    if (url.pathname.startsWith("/upload")) return env.cvvv.fetch(request);
     return env.nnn.fetch(request);
   }
 }
 
-// ========== Worker入口【终极修复！！！彻底删掉do关键字！！！】 ==========
+// ========== Worker入口【100%纯净！！无do关键字！！】 ==========
 export default {
   async fetch(request, env, ctx) {
-    // 强制所有请求转发到【亚太区唯一DO实例】，解决跨区域、跨实例隔离
-    const chatBrain = env.CHAT_DO.get(
+    // 这里用 chatServer，彻底避开do
+    const chatServer = env.CHAT_DO.get(
       env.CHAT_DO.idFromName("global-chat-brain"),
-      { locationHint: "apac" } // 锁死亚太，延迟最低
+      { locationHint: "apac" }
     );
-    return chatBrain.fetch(request);
+    return chatServer.fetch(request);
   }
 };
