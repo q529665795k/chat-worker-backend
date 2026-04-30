@@ -2,7 +2,7 @@ async fetch(request, env, ctx) {
     // ========== 强制处理WebSocket升级 + 跨域，放在最最开头 ==========
     const origin = request.headers.get('origin') || "";
     const allowOrigins = [
-      "https://b.im6.qzz.io",
+      "https://www.im6.qzz.io",
       "https://w.im6.qzz.io"
     ];
     const corsHeaders = {
