@@ -1,337 +1,271 @@
-// ====================== 【部署报错修复版｜类名ChatDO 100%匹配绑定】 ======================
-// 绑定对应：耐用对象名称 = ChatDO（和你绑定里填的完全一致！！！）
-// KV = bbb | D1 = MY_MMM | 前端 = nnn | 文件桶 = cvvv
-const KEEP_ALIVE_EXPIRE = 24 * 60 * 60 * 1000;
-const KEEP_ALIVE_CHECK_INTERVAL = 60 * 1000;
-const UNLOGGED_CLEAN_INTERVAL = 180000;
-const REDIS_EXPIRE = 7200;
-const MATCH_TIMEOUT = 15000;
-const HEARTBEAT_INTERVAL = 45000;
-const HEARTBEAT_TIMEOUT = 60000;
+// ====================== 【单文件终极版｜前端内嵌｜无外部转发】 ======================
+// 绑定仅保留：KV(bbb)、D1(MY_MMM)、耐用对象(ChatDO)
+// 前端页面直接写在代码里，Worker 自己返回，不再转发外部服务
 
-// 【强制！！！类名和你绑定里填的ChatDO完全一致】
-export class ChatDO {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-    this.userMap = new Map();
-    this.loginMap = new Map();
-    this.userSessionMap = new Map();
-    this.keepAliveMap = new Map();
-    this.userMatchTimer = new Map();
-    this.roomMem = new Map();
-    this.offlineMsgMem = new Map();
-    console.log("DO初始化完成，类名ChatDO与绑定完全匹配");
-  }
+// -------------------------- 1. 前端页面（直接写死在Worker里） --------------------------
+const HTML = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>摸鱼基地 - 聊天</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f141e;color:#fff;font-family:system-ui,-applewich,sans-serif}
+.container{max-width:800px;margin:0 auto;padding:20px}
+.header{text-align:center;padding:20px 0;border-bottom:1px solid #222}
+.btn{padding:12px 24px;border:none;border-radius:8px;background:#ff9500;color:#fff;font-size:16px;cursor:pointer;margin:5px}
+.btn-stop{background:#ff3b30}
+.chat-box{height:400px;border:1px solid #222;border-radius:8px;padding:15px;margin:20px 0;overflow-y:auto}
+.input-box{display:flex;gap:10px}
+#msg-input{flex:1;padding:12px;border:1px solid #222;border-radius:8px;background:#1a1f2e;color:#fff}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>摸鱼基地</h1>
+<p id="status">未连接</p>
+</div>
+<div>
+<button class="btn" id="match-btn">匹配聊天</button>
+<button class="btn btn-stop" id="stop-btn">结束聊天</button>
+</div>
+<div class="chat-box" id="chat"></div>
+<div class="input-box">
+<input type="text" id="msg-input" placeholder="输入消息...">
+<button class="btn" id="send-btn">发送</button>
+</div>
+</div>
 
-  async dbQuery(sql, params = []) {
-    try {
-      const stmt = this.env.MY_MMM.prepare(sql).bind(...params);
-      return await stmt.all();
-    } catch (e) {
-      console.log("数据库查询失败：" + e.message);
-      return { results: [] };
-    }
-  }
-  async dbRun(sql, params = []) {
-    try {
-      const stmt = this.env.MY_MMM.prepare(sql).bind(...params);
-      return await stmt.run();
-    } catch (e) {
-      console.log("数据库执行失败：" + e.message);
-      return null;
-    }
-  }
+<script>
+let ws;
+let username = "";
+let isMatched = false;
 
-  sysLog(tag, msg, data = {}) {
-    const t = new Date().toLocaleString('zh-CN');
-    let logStr = "[" + t + "] " + tag + "：" + msg;
-    if (Object.keys(data).length > 0) logStr += " 详情：" + JSON.stringify(data);
-    console.log(logStr);
-  }
+// 连接 WebSocket
+function connect(){
+const wsUrl = "wss://"+location.host+"/socket";
+ws = new WebSocket(wsUrl);
 
-  async callAI(prompt) {
-    try {
-      const res = await fetch("https://useavnmd-mm.hf.space/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "qwen2:0.5b",
-          messages: [{ role: "user", content: prompt }],
-          stream: false
-        }),
-        signal: AbortSignal.timeout(15000)
-      });
-      const json = await res.json();
-      return json.message?.content || "爸爸～在呢";
-    } catch (e) {
-      console.log("AI对接失败：" + e.message);
-      return "爸爸～我掉线了";
-    }
-  }
-
-  async initDB() {
-    try {
-      await this.dbRun(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT NOT NULL UNIQUE,
-        password TEXT NOT NULL,
-        nickname TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`);
-      await this.dbRun(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sender TEXT NOT NULL,
-        receiver TEXT NOT NULL,
-        content TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`);
-      this.sysLog("数据库", "数据表初始化完成");
-    } catch (err) {
-      console.log("数据库初始化错误：" + err.message);
-    }
-  }
-
-  async loadUsers() {
-    try {
-      const res = await this.dbQuery('SELECT username,nickname,password FROM users');
-      this.loginMap.clear();
-      res.results.forEach(u => this.loginMap.set(u.username, { nickname: u.nickname || u.username, password: u.password }));
-      this.sysLog("用户", "用户数据加载完成", { 总数: res.results.length });
-    } catch (e) {
-      console.log("用户数据加载失败：" + e.message);
-    }
-  }
-
-  cleanMatchTimer(uid) {
-    try {
-      if (this.userMatchTimer.has(uid)) {
-        clearTimeout(this.userMatchTimer.get(uid));
-        this.userMatchTimer.delete(uid);
-      }
-    } catch (e) {
-      console.log("清除匹配计时器失败：" + e.message);
-    }
-  }
-
-  stopChat(uid, isInitiative = true) {
-    try {
-      const me = this.userMap.get(uid);
-      if (!me || !me.partner) return;
-      this.cleanMatchTimer(uid);
-      if (me.partner !== "ai_bot") {
-        const pt = this.userMap.get(me.partner);
-        if (pt && pt.socket) {
-          pt.partner = null;
-          pt.isMatched = false;
-          pt.socket.send(JSON.stringify({ type: 'partner-leave' }));
-        }
-      }
-      me.partner = null;
-      me.isMatched = false;
-      me.socket.send(JSON.stringify({ type: 'match-end', data: { info: isInitiative ? '已断开' : '结束' } }));
-      this.sysLog("聊天", "聊天结束", { 用户: me.username });
-    } catch (e) {
-      console.log("停止聊天失败：" + e.message);
-    }
-  }
-
-  assignAiRobot(sid) {
-    try {
-      const u = this.userMap.get(sid);
-      if (!u || !u.socket || u.isMatched) return;
-      this.cleanMatchTimer(sid);
-      u.partner = "ai_bot";
-      u.isMatched = true;
-      u.socket.send(JSON.stringify({ type: 'match-found', data: { partnerName: "AI陪伴者" } }));
-      this.sysLog("匹配", "超时自动匹配AI成功", { 用户: u.username });
-    } catch (e) {
-      console.log("分配AI失败：" + e.message);
-    }
-  }
-
-  async globalMatch(env, ctx, sid) {
-    try {
-      const user = this.userMap.get(sid);
-      if (!user || !user.username) {
-        console.log("匹配失败，用户未登录");
-        return;
-      }
-      this.sysLog("匹配", "开始匹配", { 用户: user.username });
-
-      let waitRaw = null;
-      try { waitRaw = await this.env.bbb.get("global_match_wait"); } catch(e){}
-
-      if (waitRaw) {
-        const waitUser = JSON.parse(waitRaw);
-        const targetUser = this.userMap.get(waitUser.sid);
-        if (targetUser && targetUser.username) {
-          try { ctx.waitUntil(this.env.bbb.delete("global_match_wait")); } catch(e){}
-          
-          this.cleanMatchTimer(sid);
-          this.cleanMatchTimer(waitUser.sid);
-          
-          user.partner = waitUser.sid;
-          targetUser.partner = sid;
-          user.isMatched = true;
-          targetUser.isMatched = true;
-          
-          user.socket.send(JSON.stringify({ type: "match-found", data: { partnerName: targetUser.username } }));
-          targetUser.socket.send(JSON.stringify({ type: "match-found", data: { partnerName: user.username } }));
-          
-          this.sysLog("匹配", "真人匹配成功", { 用户1: user.username, 用户2: targetUser.username });
-          return;
-        }
-      }
-
-      try {
-        ctx.waitUntil(this.env.bbb.put("global_match_wait", JSON.stringify({ sid, username: user.username })));
-        this.sysLog("匹配", "进入排队池等待");
-      } catch(e){}
-
-      const timer = setTimeout(async () => {
-        try {
-          let w = null;
-          try { w = await this.env.bbb.get("global_match_wait"); } catch(e){}
-          if (w && JSON.parse(w).sid === sid) {
-            try { ctx.waitUntil(this.env.bbb.delete("global_match_wait")); } catch(e){}
-            this.assignAiRobot(sid);
-          }
-        } catch(e){}
-      }, MATCH_TIMEOUT);
-      this.userMatchTimer.set(sid, timer);
-    } catch (e) {
-      console.log("匹配流程崩溃：" + e.message);
-    }
-  }
-
-  startKeepAliveCheck() {
-    setInterval(() => {
-      try {
-        const now = Date.now();
-        this.keepAliveMap.forEach((val, uid) => {
-          const u = this.userMap.get(uid);
-          const p = this.userMap.get(val.partnerId);
-          if (!u || !p || now - u.lastKeepAlive > HEARTBEAT_TIMEOUT) {
-            this.keepAliveMap.delete(uid);
-            this.keepAliveMap.delete(val.partnerId);
-            this.stopChat(uid, false);
-            this.stopChat(val.partnerId, false);
-          }
-        });
-      } catch (e) {}
-    }, KEEP_ALIVE_CHECK_INTERVAL);
-  }
-}
-
-// ========== Worker入口（绑定名称ChatDO，和类名完全一致） ==========
-export default {
-  async fetch(request, env, ctx) {
-    try {
-      const url = new URL(request.url);
-      console.log("外层收到请求：" + url.pathname);
-
-      if (url.pathname.startsWith("/upload")) return env.cvvv.fetch(request);
-      if (url.pathname.startsWith("/api/")) return env.nnn.fetch(request);
-
-      // 【关键】调用绑定里的ChatDO
-      const obj = env.ChatDO.get(env.ChatDO.idFromName("global-chat"), { locationHint: "apac" });
-      return obj.fetch(request, env, ctx);
-    } catch (e) {
-      console.log("外层入口崩溃：" + e.message);
-      return new Response("服务器繁忙", { status: 503 });
-    }
-  }
+ws.onopen = ()=>{
+document.getElementById("status").innerText = "已连接，请登录";
+// 模拟登录（测试用，固定账号）
+username = "user_"+Math.floor(Math.random()*10000);
+ws.send(JSON.stringify({type:"user-online",username:username}));
 };
 
-// ========== DO内部处理（类名ChatDO，强制匹配） ==========
-ChatDO.prototype.fetch = async function(request, env, ctx) {
-  try {
-    const origin = request.headers.get('origin') || "";
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Credentials": "true"
-    };
+ws.onmessage = (e)=>{
+const data = JSON.parse(e.data);
+switch(data.type){
+case "match-found":
+document.getElementById("status").innerText = "匹配成功："+data.data.partnerName;
+isMatched = true;
+break;
+case "partner-leave":
+document.getElementById("status").innerText = "对方已离开";
+isMatched = false;
+break;
+case "match-end":
+document.getElementById("status").innerText = "聊天结束";
+isMatched = false;
+break;
+case "new-msg":
+const chat = document.getElementById("chat");
+chat.innerHTML += "<div>"+data.data.fromName+"："+data.data.content+"</div>";
+chat.scrollTop = chat.scrollHeight;
+break;
+}
+};
 
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+ws.onclose = ()=>{
+document.getElementById("status").innerText = "连接断开，重连中...";
+setTimeout(connect,2000);
+};
+}
 
-    const url = new URL(request.url);
-    if (url.pathname.startsWith("/socket.io")) {
-      console.log("收到WebSocket连接");
-      const upgrade = request.headers.get("Upgrade");
-      if (!upgrade || upgrade !== "websocket") return new Response("需要WebSocket", { status: 400 });
+// 匹配按钮
+document.getElementById("match-btn").onclick = ()=>{
+ws.send(JSON.stringify({type:"match-chat"}));
+document.getElementById("status").innerText = "匹配中...";
+};
 
-      const { 0: client, 1: server } = new WebSocketPair();
-      server.accept();
-      const sid = Math.random().toString(36).slice(2);
-      const user = { id: sid, socket: server, username: "", partner: null, isMatched: false, lastKeepAlive: Date.now() };
-      this.userMap.set(sid, user);
-      this.sysLog("WebSocket", "客户端连接成功", { 连接ID: sid });
+// 结束聊天
+document.getElementById("stop-btn").onclick = ()=>{
+ws.send(JSON.stringify({type:"stop-chat"}));
+};
 
-      const heartBeat = setInterval(() => {
-        try { server.send(JSON.stringify({ type: "ping" })); } catch(e) { clearInterval(heartBeat); }
-      }, HEARTBEAT_INTERVAL);
+// 发送消息
+document.getElementById("send-btn").onclick = ()=>{
+const input = document.getElementById("msg-input");
+const content = input.value.trim();
+if(!content || !isMatched)return;
+ws.send(JSON.stringify({type:"send-msg",data:{content:content}}));
+input.value = "";
+};
 
-      const unloginTimer = setInterval(() => {
-        try {
-          if (!this.userMap.has(sid)) { clearInterval(unloginTimer); clearInterval(heartBeat); return; }
-          if (!user.username) {
-            server.close();
-            this.userMap.delete(sid);
-            clearInterval(unloginTimer);
-            clearInterval(heartBeat);
-            console.log("未登录超时关闭连接：" + sid);
-          }
-        } catch(e) {}
-      }, UNLOGGED_CLEAN_INTERVAL);
+// 初始化连接
+connect();
+</script>
+</body>
+</html>
+`;
 
-      server.addEventListener("message", async (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          console.log("收到消息：" + data.type);
+// -------------------------- 2. Durable Object（聊天核心，类名ChatDO） --------------------------
+export class ChatDO {
+constructor(state, env) {
+this.state = state;
+this.env = env;
+this.userMap = new Map(); // 在线用户
+console.log("DO初始化完成");
+}
 
-          if (data.type === "ping") { server.send(JSON.stringify({ type: "pong" })); return; }
-          if (data.type === "pong") { user.lastKeepAlive = Date.now(); return; }
-          if (data.type === "user-online") {
-            user.username = data.username;
-            this.sysLog("用户上线", "登录成功", { 用户名: data.username });
-            return;
-          }
-          if (data.type === "match-chat") await this.globalMatch(env, ctx, sid);
-          if (data.type === "stop-chat") this.stopChat(sid, true);
-          if (data.type === "send-msg") {
-            const to = this.userMap.get(user.partner);
-            if (to && to.socket) {
-              await this.dbRun("INSERT INTO messages (sender,receiver,content) VALUES (?,?,?)", [user.username, to.username, data.data.content]);
-              to.socket.send(JSON.stringify({ type: "new-msg", data: { content: data.data.content, fromName: user.username } }));
-            }
-          }
-        } catch(e) { console.log("消息处理失败：" + e.message); }
-      });
+// 数据库查询
+async dbQuery(sql, params = []) {
+try {
+return await this.env.MY_MMM.prepare(sql).bind(...params).all();
+} catch(e){
+console.log("数据库失败："+e.message);
+return {results:[]};
+}
+}
 
-      server.addEventListener("close", async () => {
-        try {
-          this.cleanMatchTimer(sid);
-          this.userMap.delete(sid);
-          clearInterval(heartBeat);
-          clearInterval(unloginTimer);
-          console.log("连接关闭：" + sid);
-        } catch(e) {}
-      });
+// DO入口
+async fetch(request, env, ctx) {
+const url = new URL(request.url);
 
-      return new Response(null, { status: 101, webSocket: client });
-    }
+// 处理 WebSocket
+if(url.pathname === "/socket"){
+const upgrade = request.headers.get("Upgrade");
+if(upgrade !== "websocket") return new Response("需要WebSocket",{status:400});
 
-    await this.initDB();
-    await this.loadUsers();
+const {0:client,1:server} = new WebSocketPair();
+server.accept();
+const sid = Math.random().toString(36).slice(2);
+this.userMap.set(sid,{socket:server,username:"",partner:null,isMatched:false});
 
-    return new Response("服务运行正常", { headers: corsHeaders });
-  } catch (e) {
-    console.log("DO全局崩溃：" + e.message);
-    return new Response("服务器错误", { status: 500 });
-  }
+// 接收消息
+server.addEventListener("message",async (e)=>{
+try{
+const data = JSON.parse(e.data);
+const user = this.userMap.get(sid);
+
+// 登录
+if(data.type === "user-online"){
+user.username = data.username;
+console.log("用户登录："+data.username);
+}
+
+// 匹配聊天
+if(data.type === "match-chat"){
+await this.doMatch(sid,ctx);
+}
+
+// 结束聊天
+if(data.type === "stop-chat"){
+this.stopChat(sid);
+}
+
+// 发送消息
+if(data.type === "send-msg"){
+const target = this.userMap.get(user.partner);
+if(target && target.socket){
+target.socket.send(JSON.stringify({
+type:"new-msg",
+data:{fromName:user.username,content:data.data.content}
+}));
+}
+}
+}catch(e){
+console.log("消息处理失败："+e.message);
+}
+});
+
+// 连接关闭
+server.addEventListener("close",()=>{
+this.userMap.delete(sid);
+});
+
+return new Response(null,{status:101,webSocket:client});
+}
+
+// 根路径返回前端页面
+return new Response(HTML,{
+headers:{"Content-Type":"text/html;charset=utf-8"}
+});
+}
+
+// 匹配核心逻辑
+async doMatch(sid,ctx){
+const user = this.userMap.get(sid);
+if(!user.username)return;
+
+// 读取排队池
+let wait = await this.env.bbb.get("global_match_wait");
+if(wait){
+// 有排队用户，直接匹配
+const waitUser = JSON.parse(wait);
+const target = this.userMap.get(waitUser.sid);
+if(target){
+// 清空排队池
+ctx.waitUntil(this.env.bbb.delete("global_match_wait"));
+// 互相绑定
+user.partner = waitUser.sid;
+target.partner = sid;
+user.isMatched = true;
+target.isMatched = true;
+// 发送匹配成功
+user.socket.send(JSON.stringify({type:"match-found",data:{partnerName:target.username}}));
+target.socket.send(JSON.stringify({type:"match-found",data:{partnerName:user.username}}));
+console.log("真人匹配成功");
+return;
+}
+}
+
+// 没人排队，自己进池
+ctx.waitUntil(this.env.bbb.put("global_match_wait",JSON.stringify({sid,username:user.username})));
+console.log("进入排队池");
+
+// 15秒超时匹配AI
+setTimeout(async ()=>{
+const check = await this.env.bbb.get("global_match_wait");
+if(check && JSON.parse(check).sid === sid){
+ctx.waitUntil(this.env.bbb.delete("global_match_wait"));
+// 匹配AI
+user.partner = "ai";
+user.isMatched = true;
+user.socket.send(JSON.stringify({type:"match-found",data:{partnerName:"AI陪伴者"}}));
+console.log("超时匹配AI");
+}
+},15000);
+}
+
+// 结束聊天
+stopChat(sid){
+const user = this.userMap.get(sid);
+if(!user)return;
+// 清空对方
+if(user.partner && user.partner !== "ai"){
+const target = this.userMap.get(user.partner);
+if(target){
+target.partner = null;
+target.isMatched = false;
+target.socket.send(JSON.stringify({type:"partner-leave"}));
+}
+}
+// 清空自己
+user.partner = null;
+user.isMatched = false;
+user.socket.send(JSON.stringify({type:"match-end"}));
+}
+}
+
+// -------------------------- 3. Worker入口（极简，只转发给DO） --------------------------
+export default {
+async fetch(request, env, ctx) {
+// 直接调用ChatDO，不再转发任何外部服务
+const obj = env.ChatDO.get(env.ChatDO.idFromName("global"),{locationHint:"apac"});
+return obj.fetch(request,env,ctx);
+}
 };
