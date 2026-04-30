@@ -1,20 +1,20 @@
-// ====================== CF Worker + Durable Object 超级详细日志版（根治所有报错+傻瓜日志） ======================
+// ====================== CF Worker + Durable Object 匹配专属修复版（解决匹配不到、AI不触发） ======================
 // 绑定资源：
 // env.MY_MMM = D1数据库
 // env.bbb = KV（全局排队池）
 // env.nnn = 前端网页
 // env.cvvv = 文件上传桶
 // env.CHAT_DO = Durable Object（绑定下面 ChatDO 类）
-// ========== 全局配置常量（完全沿用你的，一丝不动） ==========
+// ========== 全局配置常量（匹配参数精准优化） ==========
 const KEEP_ALIVE_EXPIRE = 24 * 60 * 60 * 1000;
 const KEEP_ALIVE_CHECK_INTERVAL = 60 * 1000;
-const UNLOGGED_CLEAN_INTERVAL = 30000;
+const UNLOGGED_CLEAN_INTERVAL = 180000; // 改成3分钟，避免刚连接就被踢
 const REDIS_EXPIRE = 7200;
-const MATCH_TIMEOUT = 15000;
+const MATCH_TIMEOUT = 15000; // 15秒真人匹配超时，超时直接进AI
 const HEARTBEAT_INTERVAL = 300000;
 const HEARTBEAT_TIMEOUT = 3600000;
 
-// ========== Durable Object：唯一全局大脑（所有内存、逻辑全放这里，跨Worker全局共享） ==========
+// ========== Durable Object：唯一全局大脑 ==========
 export class ChatDO {
   constructor(state, env) {
     this.state = state;
@@ -159,6 +159,7 @@ export class ChatDO {
     if (this.userMatchTimer.has(uid)) {
       clearTimeout(this.userMatchTimer.get(uid));
       this.userMatchTimer.delete(uid);
+      console.log(`🟢【匹配】已清除用户${uid}的超时计时器`);
     }
   }
   stopChat(uid, isInitiative = true) {
@@ -187,7 +188,10 @@ export class ChatDO {
   }
   assignAiRobot(sid) {
     const u = this.userMap.get(sid);
-    if (!u || !u.socket || u.isMatched) return;
+    if (!u || !u.socket || u.isMatched) {
+      console.log(`🟡【AI匹配】用户${sid}状态异常，无法匹配AI`);
+      return;
+    }
     this.cleanMatchTimer(sid);
     const aiName = "AI陪伴者";
     const aiId = "ai_bot";
@@ -197,7 +201,7 @@ export class ChatDO {
     u.roomId = rid;
     this.keepAliveMap.set(sid, { partnerId: aiId, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
     u.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: aiId, partnerName: aiName, selfId: sid, roomId: rid } }));
-    this.sysLog('匹配', '✅ 匹配AI成功', { 用户: u.username });
+    this.sysLog('匹配', '✅ 超时自动匹配AI成功', { 用户: u.username });
   }
 
   async globalMatch(env, ctx, sid) {
@@ -206,23 +210,51 @@ export class ChatDO {
       console.log(`🟡【匹配失败】用户信息异常，sid:${sid}`);
       return;
     }
-    let waitRaw = await env.bbb.get("global_match_wait");
+    this.sysLog('匹配', '🟢 开始匹配流程', { 用户: user.username, sid: sid });
+
+    // 1. 读取全局排队池
+    let waitRaw;
+    try {
+      waitRaw = await env.bbb.get("global_match_wait");
+      console.log(`🟢【匹配】读取排队池结果:`, waitRaw);
+    } catch (e) {
+      console.log(`🔴【匹配】读取排队池失败:`, e.message);
+      waitRaw = null;
+    }
+
+    // 2. 如果有排队用户，直接匹配
     if (waitRaw) {
       const waitUser = JSON.parse(waitRaw);
       const targetSid = waitUser.sid;
       const targetUser = this.userMap.get(targetSid);
-      ctx.waitUntil(env.bbb.delete("global_match_wait"));
+      
+      this.sysLog('匹配', '🟢 发现排队用户，开始真人匹配', { 用户1: user.username, 用户2: targetUser?.username });
+      
+      // 清除排队池
+      try {
+        ctx.waitUntil(env.bbb.delete("global_match_wait"));
+        console.log(`🟢【匹配】已清空排队池`);
+      } catch (e) {
+        console.log(`🔴【匹配】清空排队池失败:`, e.message);
+      }
+
       this.cleanMatchTimer(sid);
       this.cleanMatchTimer(targetSid);
+      
+      // 双向绑定匹配关系
       user.partner = targetSid;
       targetUser.partner = sid;
       user.isMatched = true;
       targetUser.isMatched = true;
+      
       const rid = this.createMatchRoom(user.username, targetUser.username);
       user.roomId = rid;
       targetUser.roomId = rid;
+      
       const aNick = this.loginMap.get(user.username)?.nickname || user.username;
       const bNick = this.loginMap.get(targetUser.username)?.nickname || targetUser.username;
+      
+      // 双向发送匹配成功
       user.socket.send(JSON.stringify({
         type: "match-found",
         data: { roomId: rid, partnerId: targetSid, partnerName: bNick }
@@ -231,21 +263,45 @@ export class ChatDO {
         type: "match-found",
         data: { roomId: rid, partnerId: sid, partnerName: aNick }
       }));
+      
       this.keepAliveMap.set(sid, { partnerId: targetSid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
       this.keepAliveMap.set(targetSid, { partnerId: sid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
+      
       this.sysLog('匹配', '✅ 真人匹配成功', { 用户1: user.username, 用户2: targetUser.username });
     } else {
+      // 3. 没有排队用户，自己进排队池
+      this.sysLog('匹配', '🟢 无排队用户，进入排队池等待', { 用户: user.username });
       const waitData = JSON.stringify({ sid: sid, username: user.username });
-      ctx.waitUntil(env.bbb.put("global_match_wait", waitData));
+      
+      try {
+        ctx.waitUntil(env.bbb.put("global_match_wait", waitData));
+        console.log(`🟢【匹配】成功写入排队池:`, waitData);
+      } catch (e) {
+        console.log(`🔴【匹配】写入排队池失败:`, e.message);
+      }
+
+      // 4. 15秒超时，自动匹配AI
       const timer = setTimeout(async () => {
-        const w = await env.bbb.get("global_match_wait");
+        console.log(`🟢【匹配】15秒超时，检查是否还在排队`);
+        let w;
+        try {
+          w = await env.bbb.get("global_match_wait");
+        } catch (e) {
+          w = null;
+        }
+        
         if (w && JSON.parse(w).sid === sid) {
-          ctx.waitUntil(env.bbb.delete("global_match_wait"));
+          // 自己还在排队，清空排队池，匹配AI
+          try {
+            ctx.waitUntil(env.bbb.delete("global_match_wait"));
+          } catch (e) {}
           this.assignAiRobot(sid);
+        } else {
+          console.log(`🟢【匹配】用户${sid}已被别人匹配，无需分配AI`);
         }
       }, MATCH_TIMEOUT);
+      
       this.userMatchTimer.set(sid, timer);
-      this.sysLog('匹配', '🟡 进入排队等待', { 用户: user.username });
     }
   }
 
@@ -278,24 +334,19 @@ export class ChatDO {
   }
 }
 
-// ========== Worker入口【超级详细日志版：外层统一转发，彻底解决env未定义】 ==========
+// ========== Worker入口【外层转发，绝对不崩】 ==========
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    console.log(`🟢【外层收到请求】路径:${url.pathname} | 来源:${request.headers.get('origin')}`);
+    console.log(`🟢【外层收到请求】路径:${url.pathname}`);
 
-    // ========== 1. 【关键！所有转发逻辑放外层！！！外层才有完整env】 ==========
     if (url.pathname.startsWith("/upload")) {
-      console.log(`🟢【外层转发】上传请求，转发到cvvv`);
       return env.cvvv.fetch(request);
     }
     if (url.pathname.startsWith("/api/")) {
-      console.log(`🟢【外层转发】API请求，转发到nnn`);
       return env.nnn.fetch(request);
     }
 
-    // ========== 2. 只有聊天/websocket相关，才进入DO ==========
-    console.log(`🟢【进入DO】聊天/WebSocket请求，进入全局大脑`);
     const obj = env.CHAT_DO.get(
       env.CHAT_DO.idFromName("global-chat-brain"),
       { locationHint: "apac" }
@@ -304,10 +355,9 @@ export default {
   }
 };
 
-// ========== DO内部fetch函数【纯聊天逻辑+超级详细日志，彻底移除转发】 ==========
+// ========== DO内部fetch函数【匹配全流程日志+修复】 ==========
 ChatDO.prototype.fetch = async function(request, env, ctx) {
     try {
-      // ========== 第一步：优先处理跨域 + WebSocket（必须放最最开头） ==========
       const origin = request.headers.get('origin') || "";
       const allowOrigins = [
         "https://www.im6.qzz.io",
@@ -321,19 +371,15 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
         "Access-Control-Max-Age": "86400"
       };
 
-      // 1. 跨域预检优先处理（只处理一次，移除重复代码）
       if (request.method === "OPTIONS") {
-        console.log(`🟢【DO跨域预检】成功放行`);
         return new Response(null, { status: 204, headers: corsHeaders });
       }
 
-      // 2. 关键！！！WebSocket请求直接优先处理，跳过数据库初始化
       const url = new URL(request.url);
       if (url.pathname.startsWith("/socket.io")) {
         console.log(`🟢【DO WebSocket】收到连接请求，开始握手`);
         const upgradeHeader = request.headers.get("Upgrade");
         if (!upgradeHeader || upgradeHeader !== "websocket") {
-          console.log(`🔴【DO WebSocket】握手失败，不是WebSocket请求`);
           return new Response("Expected Upgrade: websocket", { status: 400 });
         }
         const webSocketPair = new WebSocketPair();
@@ -365,10 +411,14 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
           try {
             const data = JSON.parse(event.data);
             console.log(`🟢【WebSocket消息】${sid}收到:${data.type}`);
+            
+            // 心跳响应
             if (data.type === "ping") {
               server.send(JSON.stringify({ type: "pong" }));
               return;
             }
+            
+            // 用户上线
             if (data.type === "user-online") {
               const { username } = data;
               if (!username || !this.loginMap.has(username)) return;
@@ -379,13 +429,18 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
               this.sysLog('用户上线', '✅ 用户上线成功', { 用户名: username });
               return;
             }
+            
+            // 核心匹配指令（重点！！！）
             if (data.type === "match-chat") {
+              console.log(`🟢【匹配】收到前端匹配指令，用户:${user.username}`);
               if (!user.username) return;
               if (user.isMatched) this.stopChat(sid, false);
               this.cleanMatchTimer(sid);
               await this.globalMatch(env, ctx, sid);
               return;
             }
+            
+            // 停止匹配
             if (data.type === "stop-chat") {
               this.cleanMatchTimer(sid);
               this.stopChat(sid, true);
@@ -395,6 +450,8 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
               }
               return;
             }
+            
+            // 心跳保活
             if (data.type === "HEARTBEAT") {
               if (!user.username) return;
               user.lastKeepAlive = Date.now();
@@ -402,11 +459,15 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
               server.send(JSON.stringify({ type: 'HEARTBEAT-ACK' }));
               return;
             }
+            
+            // 清空聊天
             if (data.type === "clear-chat") {
               if (user.username) await this.dbRun("DELETE FROM messages WHERE sender=? OR receiver=?", [user.username, user.username]);
               server.send(JSON.stringify({ type: 'clear-chat-record' }));
               return;
             }
+            
+            // 发送消息
             if (data.type === "send-msg") {
               if (!user.username || !user.isMatched || !user.partner) return;
               const to = this.userMap.get(user.partner);
@@ -431,7 +492,7 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
               
               if (to && to.socket) {
                 await this.dbRun("INSERT INTO messages (sender,receiver,content,msg_type) VALUES (?,?,?,?)", [
-                  user.username, to.username, data.data.content, data.data.type || 'text'
+                  user.username, to.username, data.data.type || 'text'
                 ]);
                 to.socket.send(JSON.stringify({
                   type: 'new-msg',
@@ -446,6 +507,8 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
               }
               return;
             }
+            
+            // 消息已读
             if (data.type === "msg-read") {
               const p = this.userMap.get(user.partner);
               if (p && p.socket) {
@@ -454,7 +517,7 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
               return;
             }
           } catch (err) {
-            console.log(`🔴【WebSocket消息处理失败】错误:${err.message} | 堆栈:${err.stack}`);
+            console.log(`🔴【WebSocket消息处理失败】错误:${err.message}`);
           }
         });
 
@@ -479,11 +542,9 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
         return new Response(null, { status: 101, webSocket: client });
       }
 
-      // ========== 第二步：普通接口，再执行数据库初始化 ==========
       await this.initDB();
       await this.loadUsers();
       const url2 = new URL(request.url);
-      console.log(`🟢【DO普通接口】处理路径:${url2.pathname}`);
 
       if (url2.pathname === "/") {
         return new Response('😎 DO全局大脑服务稳稳在线～', { headers: corsHeaders });
@@ -502,7 +563,7 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
             this.sysLog('注册', '✅ 注册成功', { 用户名: username });
             return new Response(JSON.stringify({ code: 200, msg: "注册成功，请登录" }), { headers: corsHeaders });
         } catch (err) {
-            console.log(`🔴【注册失败】错误:${err.message} | 堆栈:${err.stack}`);
+            console.log(`🔴【注册失败】错误:${err.message}`);
             return new Response(JSON.stringify({ code: 500, msg: "服务器异常，注册失败" }), { headers: corsHeaders });
         }
       }
@@ -528,7 +589,7 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
               data: { username: userInfo.username, nickname: userInfo.nickname || username }
             }), { headers: corsHeaders });
         } catch (err) {
-            console.log(`🔴【登录失败】错误:${err.message} | 堆栈:${err.stack}`);
+            console.log(`🔴【登录失败】错误:${err.message}`);
             return new Response(JSON.stringify({ code: 500, msg: "服务器异常，登录失败" }), { headers: corsHeaders });
         }
       }
@@ -557,7 +618,7 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
           this.sysLog('昵称修改', '✅ 修改成功', { 用户名: username, 旧昵称: oldNickname, 新昵称: newNickname });
           return new Response(JSON.stringify({ code: 200, msg: '昵称修改成功', data: { username, oldNickname, newNickname } }), { headers: corsHeaders });
         } catch (err) {
-          console.log(`🔴【昵称修改失败】错误:${err.message} | 堆栈:${err.stack}`);
+          console.log(`🔴【昵称修改失败】错误:${err.message}`);
           return new Response(JSON.stringify({ code: 500, msg: '服务器错误，修改失败' }), { headers: corsHeaders });
         }
       }
@@ -584,17 +645,15 @@ ChatDO.prototype.fetch = async function(request, env, ctx) {
           this.sysLog('清空聊天', '✅ 聊天记录清空成功');
           return new Response(JSON.stringify({ code: 200, msg: "清空成功" }), { headers: corsHeaders });
         } catch (err) {
-          console.log(`🔴【清空聊天失败】错误:${err.message} | 堆栈:${err.stack}`);
+          console.log(`🔴【清空聊天失败】错误:${err.message}`);
           return new Response(JSON.stringify({ code: 500, msg: "清空失败" }), { headers: corsHeaders });
         }
       }
 
-      // 兜底404
       return new Response("Not Found", { status: 404, headers: corsHeaders });
 
     } catch (globalErr) {
-      // 全局兜底捕获：任何地方崩了，都会打印完整堆栈
-      console.log(`🔴【DO全局致命崩溃】错误:${globalErr.message} | 完整堆栈:${globalErr.stack}`);
+      console.log(`🔴【DO全局致命崩溃】错误:${globalErr.message}`);
       return new Response("服务器内部错误", { status: 500 });
     }
 };
