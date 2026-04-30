@@ -321,7 +321,7 @@ async function handleRequest(request, env, ctx) {
 
   // WebSocket聊天核心
   if (url.pathname.startsWith("/socket.io") ) {
- {
+ 
     const upgradeHeader = request.headers.get("Upgrade");
     if (!upgradeHeader || upgradeHeader !== "websocket") {
       return new Response("Expected Upgrade: websocket", { status: 400 });
