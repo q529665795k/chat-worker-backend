@@ -230,13 +230,21 @@ async function globalMatch(env, sid) {
     user.roomId = rid;
     targetUser.roomId = rid;
 
-    // 获取双方昵称
+        // 获取双方昵称
     const aNick = loginMap.get(user.username)?.nickname || user.username;
     const bNick = loginMap.get(targetUser.username)?.nickname || targetUser.username;
 
-    // 互相发送匹配成功
-    user.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: targetSid, partnerName: bNick, selfId: sid, roomId: rid } }));
-    targetUser.socket.send(JSON.stringify({ type: 'match-found', data: { partnerId: sid, partnerName: aNick, selfId: targetSid, roomId: rid } }));
+    // ✅ 修复：用emit发送，和前端socket.io完全匹配，字段精准对齐
+    user.socket.emit("match-found", {
+      roomId: rid,
+      partnerId: targetSid,
+      partnerName: bNick
+    });
+    targetUser.socket.emit("match-found", {
+      roomId: rid,
+      partnerId: sid,
+      partnerName: aNick
+    });
 
     // 保活绑定
     keepAliveMap.set(sid, { partnerId: targetSid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
@@ -245,10 +253,12 @@ async function globalMatch(env, sid) {
     sysLog('MATCH', '✅ 跨实例真人匹配成功', { a: user.username, b: targetUser.username, room: rid });
 
   } else {
-    // ✅ KV里没人排队，我进全局排队池
+    // ✅ KV里没人排队，我进全局排队池（新增存储nickname，解决昵称空问题）
+    const userNick = loginMap.get(user.username)?.nickname || user.username;
     await kvPut(env, "global_match_wait", JSON.stringify({
       sid: sid,
-      username: user.username
+      username: user.username,
+      nickname: userNick
     }));
 
     // 15秒没人匹配，自动匹配AI
@@ -265,7 +275,6 @@ async function globalMatch(env, sid) {
 
     sysLog('MATCH', '⏳ 进入全局KV排队池', { user: user.username, sid: sid });
   }
-}
 
 function startKeepAliveCheck() {
   setInterval(() => {
