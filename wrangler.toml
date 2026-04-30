@@ -10,7 +10,7 @@ database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"
 
 # KV 命名空间（代码里用 env.bbb）
 [[kv_namespaces]]
-binding = "env.bbb"
+binding = "bbb"
 id = "075caae527884570bad346b6c3cf5abf"
 
 # 服务绑定（前端 Worker：wandering-river-7d75）
