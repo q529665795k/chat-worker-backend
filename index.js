@@ -199,7 +199,7 @@ function assignAiRobot(sid) {
   sysLog('MATCH', '匹配AI成功', { user: u.username });
 }
 
-// ========== 【终极重写】全局KV跨实例匹配核心（根治匹配不上） ==========
+// ========== 【终极重写】全局KV跨实例匹配核心（根治匹配不上+修复所有语法） ==========
 async function globalMatch(env, sid) {
   const user = userMap.get(sid);
   if (!user || !user.username) return;
@@ -230,21 +230,27 @@ async function globalMatch(env, sid) {
     user.roomId = rid;
     targetUser.roomId = rid;
 
-        // 获取双方昵称
+    // 获取双方昵称
     const aNick = loginMap.get(user.username)?.nickname || user.username;
     const bNick = loginMap.get(targetUser.username)?.nickname || targetUser.username;
 
-    // ✅ 修复：用emit发送，和前端socket.io完全匹配，字段精准对齐
-    user.socket.emit("match-found", {
-      roomId: rid,
-      partnerId: targetSid,
-      partnerName: bNick
-    });
-    targetUser.socket.emit("match-found", {
-      roomId: rid,
-      partnerId: sid,
-      partnerName: aNick
-    });
+    // ✅ 修复：用标准send发送JSON，和前端100%兼容（彻底解决部署报错+匹配字段对齐）
+    user.socket.send(JSON.stringify({
+      type: "match-found",
+      data: {
+        roomId: rid,
+        partnerId: targetSid,
+        partnerName: bNick
+      }
+    }));
+    targetUser.socket.send(JSON.stringify({
+      type: "match-found",
+      data: {
+        roomId: rid,
+        partnerId: sid,
+        partnerName: aNick
+      }
+    }));
 
     // 保活绑定
     keepAliveMap.set(sid, { partnerId: targetSid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
@@ -275,6 +281,7 @@ async function globalMatch(env, sid) {
 
     sysLog('MATCH', '⏳ 进入全局KV排队池', { user: user.username, sid: sid });
   }
+}
 
 function startKeepAliveCheck() {
   setInterval(() => {
@@ -496,7 +503,7 @@ async function handleRequest(request, env) {
   }
 
   // 注册接口（精准校验，防重复）
-if (url.pathname === "/register" && request.method === "POST") {
+  if (url.pathname === "/register" && request.method === "POST") {
     const body = await request.json();
     const { username, password } = body;
     try {
@@ -516,11 +523,10 @@ if (url.pathname === "/register" && request.method === "POST") {
     } catch (err) {
         return new Response(JSON.stringify({ code: 500, msg: "服务器异常，注册失败" }), { headers: corsHeaders });
     }
-}
+  }
 
   // 登录接口（D1语法适配，字段匹配，KV互踢绑定）
-  // 登录接口（分步校验：区分账号不存在 / 密码错误）
-if (url.pathname === "/login" && request.method === "POST") {
+  if (url.pathname === "/login" && request.method === "POST") {
     const body = await request.json();
     const { username, password } = body;
     try {
@@ -554,7 +560,7 @@ if (url.pathname === "/login" && request.method === "POST") {
     } catch (err) {
         return new Response(JSON.stringify({ code: 500, msg: "服务器异常，登录失败" }), { headers: corsHeaders });
     }
-}
+  }
 
   // 修改昵称接口（D1语法适配，字段匹配）
   if (url.pathname === "/update-nickname" && request.method === "POST") {
