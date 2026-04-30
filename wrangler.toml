@@ -2,19 +2,16 @@ name = "tiny-glade-72fa"
 main = "index.js"
 compatibility_date = "2026-04-30"
 
-# ========== D1 数据库（Pages/Git部署必须加preview_database_id） ==========
 [[d1_databases]]
 binding = "MY_MMM"
 database_name = "mm"
 database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"
-preview_database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"  # 关键！必须和主ID一样
+preview_database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"
 
-# ========== KV ==========
 [[kv_namespaces]]
 binding = "bbb"
 id = "075caae527884570bad346b6c3cf5abf"
 
-# ========== 服务绑定 ==========
 [[services]]
 binding = "nnn"
 service = "wandering-river-7d75"
@@ -25,7 +22,6 @@ binding = "cvvv"
 service = "jolly-disk-5d37"
 environment = "production"
 
-# ========== Durable Object ==========
 [[durable_objects.bindings]]
 name = "CHAT_DO"
 class_name = "ChatDO"
