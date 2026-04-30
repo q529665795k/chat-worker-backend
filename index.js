@@ -199,13 +199,23 @@ function assignAiRobot(sid) {
   sysLog('MATCH', '匹配AI成功', { user: u.username });
 }
 
-// ========== 【终极重写】全局KV跨实例匹配核心（根治匹配不上+修复所有语法） ==========
+// ========== 【精准修复】全局KV跨实例匹配核心（保留你原逻辑，只补漏洞） ==========
 async function globalMatch(env, sid) {
   const user = userMap.get(sid);
-  if (!user || !user.username) return;
-
-  // 1. 读取全局KV排队池
-  const waitRaw = await kvGet(env, "global_match_wait");
+  // ✅ 修复1：强化用户校验，杜绝脏数据
+  if (!user || !user.username || !loginMap.has(user.username)) {
+    sysLog('MATCH_ERROR', '❌ 用户不合法，拒绝匹配', { sid, user });
+    return;
+  }
+  // ✅ 修复2：加KV读取日志，失败直接打印
+  let waitRaw;
+  try {
+    waitRaw = await kvGet(env, "global_match_wait");
+    sysLog('KV_DEBUG', '🔍 读取排队池', { 内容: waitRaw || "空" });
+  } catch (e) {
+    sysLog('KV_ERROR', '❌ 读取KV失败！！！99%是KV没绑定', { 错误: e.message });
+    return;
+  }
 
   if (waitRaw) {
     // ✅ KV里有人排队！跨实例也能读到！直接配对！
@@ -213,8 +223,13 @@ async function globalMatch(env, sid) {
     const targetSid = waitUser.sid;
     const targetUser = userMap.get(targetSid);
 
-    // 清空KV排队池
-    await kvDel(env, "global_match_wait");
+    // ✅ 修复3：加KV删除日志
+    try {
+      await kvDel(env, "global_match_wait");
+      sysLog('KV_DEBUG', '🗑️ 清空排队池成功');
+    } catch (e) {
+      sysLog('KV_ERROR', '❌ 删除KV失败', { 错误: e.message });
+    }
 
     // 两边初始化匹配信息
     cleanMatchTimer(sid);
@@ -261,27 +276,39 @@ async function globalMatch(env, sid) {
   } else {
     // ✅ KV里没人排队，我进全局排队池（新增存储nickname，解决昵称空问题）
     const userNick = loginMap.get(user.username)?.nickname || user.username;
-    await kvPut(env, "global_match_wait", JSON.stringify({
+    const waitData = JSON.stringify({
       sid: sid,
       username: user.username,
       nickname: userNick
-    }));
+    });
+    // ✅ 修复4：加KV写入日志+异常捕获
+    try {
+      await kvPut(env, "global_match_wait", waitData);
+      sysLog('KV_DEBUG', '✅ 写入排队池成功', { 写入内容: waitData });
+    } catch (e) {
+      sysLog('KV_ERROR', '❌ 写入KV失败！！！', { 错误: e.message });
+      return;
+    }
 
-    // 15秒没人匹配，自动匹配AI
-    const timer = setTimeout(() => {
-      // 超时前先检查自己还在不在排队池
-      kvGet(env, "global_match_wait").then(w => {
+    // 15秒没人匹配，自动匹配AI（修复5：超时逻辑优化，先查再删）
+    const timer = setTimeout(async () => {
+      try {
+        const w = await kvGet(env, "global_match_wait");
         if (w && JSON.parse(w).sid === sid) {
-          kvDel(env, "global_match_wait");
+          await kvDel(env, "global_match_wait");
+          sysLog('MATCH', '⏰ 超时，匹配AI');
           assignAiRobot(sid);
         }
-      });
+      } catch (e) {
+        sysLog('KV_ERROR', '❌ 超时检查KV失败', { 错误: e.message });
+      }
     }, MATCH_TIMEOUT);
     userMatchTimer.set(sid, timer);
 
     sysLog('MATCH', '⏳ 进入全局KV排队池', { user: user.username, sid: sid });
   }
 }
+
 
 function startKeepAliveCheck() {
   setInterval(() => {
