@@ -76,7 +76,7 @@ async function callAI(prompt) {
   }
 }
 
-// ========== 数据库初始化（自动建表，适配D1） ==========
+// ========== 数据库初始化（自动建表，100%匹配前后端字段） ==========
 async function initDB(env) {
   try {
     await dbRun(env, `
@@ -127,7 +127,7 @@ async function initDB(env) {
   }
 }
 
-// ========== 用户加载（适配D1） ==========
+// ========== 用户加载（适配D1，字段完全匹配KV） ==========
 async function loadUsers(env) {
   try {
     const res = await dbQuery(env, 'SELECT username,nickname,password FROM users');
@@ -333,14 +333,14 @@ async function handleRequest(request, env) {
           server.send(JSON.stringify({ type: "pong" }));
           return;
         }
-        // 用户上线
+        // 用户上线（KV互踢：严格匹配D1用户字段）
         if (data.type === "user-online") {
           const { username } = data;
           if (!username || !loginMap.has(username)) return;
           user.username = username;
           userSessionMap.set(username, sid);
           usernameToSocket.set(username, server);
-          // KV互踢：顶掉旧设备
+          // KV互踢：顶掉旧设备（和D1用户完全绑定）
           await kvPut(env, `user_${username}`, sid);
           sysLog('ONLINE', '用户上线', { username, sid });
           autoJoinMatchPool(sid);
@@ -381,7 +381,7 @@ async function handleRequest(request, env) {
           server.send(JSON.stringify({ type: 'clear-chat-record' }));
           return;
         }
-        // 发送消息（核心逻辑完全不动）
+        // 发送消息（核心逻辑完全不动，D1入库语法适配）
         if (data.type === "send-msg") {
           if (!user.username || !user.isMatched || !user.partner) return;
           const to = userMap.get(user.partner);
@@ -405,9 +405,8 @@ async function handleRequest(request, env) {
             return;
           }
           
-          // 真人转发
+          // 真人转发（D1入库适配，字段完全匹配）
           if (to && to.socket) {
-            // 消息入库
             await dbRun(env, "INSERT INTO messages (sender,receiver,content,msg_type) VALUES (?,?,?,?)", [
               user.username, to.username, data.data.content, data.data.type || 'text'
             ]);
@@ -437,7 +436,7 @@ async function handleRequest(request, env) {
       }
     });
 
-    // 断开连接
+    // 断开连接（KV清理严格匹配D1用户）
     server.addEventListener("close", () => {
       cleanMatchTimer(sid);
       waitingUsers.delete(sid);
@@ -456,7 +455,7 @@ async function handleRequest(request, env) {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // 注册接口
+  // 注册接口（D1语法适配，字段匹配，KV同步）
   if (url.pathname === "/register" && request.method === "POST") {
     const body = await request.json();
     const { username, password } = body;
@@ -466,8 +465,9 @@ async function handleRequest(request, env) {
         return new Response(JSON.stringify({ code: 400, msg: '用户名已被注册，请换一个' }), { headers: corsHeaders });
       }
       const defaultNickname = username;
-      await dbRun(env, `INSERT INTO users (username, password, nickname) VALUES (?, ?, ?)`, [username, password, defaultNickname]);
-      await dbRun(env, `INSERT INTO register_logs (username, password) VALUES (?, ?)`, [username, password]);
+      // D1插入语法适配
+      await dbRun(env, `INSERT INTO users (username, password, nickname, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, [username, password, defaultNickname]);
+      await dbRun(env, `INSERT INTO register_logs (username, password, register_time) VALUES (?, ?, CURRENT_TIMESTAMP)`, [username, password]);
       loginMap.set(username, { nickname: defaultNickname, password });
       return new Response(JSON.stringify({ code: 200, msg: '注册成功', data: { username, nickname: defaultNickname } }), { headers: corsHeaders });
     } catch (err) {
@@ -475,7 +475,7 @@ async function handleRequest(request, env) {
     }
   }
 
-  // 登录接口
+  // 登录接口（D1语法适配，字段匹配，KV互踢绑定）
   if (url.pathname === "/login" && request.method === "POST") {
     const body = await request.json();
     const { username, password } = body;
@@ -488,7 +488,7 @@ async function handleRequest(request, env) {
       if (user.password !== password) {
         return new Response(JSON.stringify({ code: 400, msg: '密码错误' }), { headers: corsHeaders });
       }
-      await dbRun(env, `INSERT INTO login_logs (username) VALUES (?)`, [username]);
+      await dbRun(env, `INSERT INTO login_logs (username, login_time) VALUES (?, CURRENT_TIMESTAMP)`, [username]);
       loginMap.set(username, { nickname: user.nickname, password: user.password });
       return new Response(JSON.stringify({ 
         code: 200, msg: '登录成功', 
@@ -499,7 +499,7 @@ async function handleRequest(request, env) {
     }
   }
 
-  // 修改昵称接口
+  // 修改昵称接口（D1语法适配，字段匹配）
   if (url.pathname === "/update-nickname" && request.method === "POST") {
     const body = await request.json();
     const { username, newNickname } = body;
@@ -516,8 +516,8 @@ async function handleRequest(request, env) {
       if (oldNickname === newNickname) {
         return new Response(JSON.stringify({ code: 200, msg: '昵称未发生变化' }), { headers: corsHeaders });
       }
-      await dbRun(env, `UPDATE users SET nickname = ? WHERE username = ?`, [newNickname, username]);
-      await dbRun(env, `INSERT INTO nickname_logs (username, old_nickname, new_nickname) VALUES (?, ?, ?)`, [username, oldNickname, newNickname]);
+      await dbRun(env, `UPDATE users SET nickname = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`, [newNickname, username]);
+      await dbRun(env, `INSERT INTO nickname_logs (username, old_nickname, new_nickname, create_time) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`, [username, oldNickname, newNickname]);
       if (loginMap.has(username)) {
         loginMap.set(username, { ...loginMap.get(username), nickname: newNickname });
       }
@@ -527,7 +527,7 @@ async function handleRequest(request, env) {
     }
   }
 
-  // 在线用户接口
+  // 在线用户接口（逻辑完全不动）
   if (url.pathname === "/api/onlineUser") {
     const onlineList = [];
     userMap.forEach(item => {
@@ -543,10 +543,10 @@ async function handleRequest(request, env) {
     return new Response(JSON.stringify({ code: 200, total: onlineList.length, list: onlineList }), { headers: corsHeaders });
   }
 
-  // 清空聊天接口
+  // 清空聊天接口（D1语法适配）
   if (url.pathname === "/api/clearChatOnly" && request.method === "POST") {
     try {
-      await dbRun(env, "TRUNCATE TABLE messages");
+      await dbRun(env, "DELETE FROM messages");
       offlineMsgMem.clear();
       return new Response(JSON.stringify({ code: 200, msg: "清空成功" }), { headers: corsHeaders });
     } catch (err) {
@@ -554,12 +554,12 @@ async function handleRequest(request, env) {
     }
   }
 
-  // 文件上传接口（零延迟转发到cvvv）
+  // 文件上传接口（零延迟转发到cvvv，完全不动）
   if (url.pathname.startsWith("/upload")) {
     return env.cvvv.fetch(request);
   }
 
-  // 其他所有请求 → 返回前端网页（零延迟绑定）
+  // 其他所有请求 → 返回前端网页（零延迟绑定，完全不动）
   return env.nnn.fetch(request);
 }
 
