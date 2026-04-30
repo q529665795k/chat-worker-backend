@@ -1,7 +1,7 @@
 name = "tiny-glade-72fa"
 main = "index.js"
 compatibility_date = "2026-04-30"
-
+ 
 [[d1_databases]]
 binding = "MY_MMM"
 database_name = "mm"
