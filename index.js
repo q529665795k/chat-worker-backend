@@ -266,46 +266,81 @@ async function globalMatch(env, sid) {
         partnerName: aNick
       }
     }));
+async function globalMatch(env, ctx, sid) {
+  const user = userMap.get(sid);
+  if (!user || !user.username) {
+    console.log("❌ 用户信息异常，终止匹配");
+    return;
+  }
+
+  console.log("🔍 开始匹配，准备读取KV");
+  // 1. 原生读取KV（官方标准）
+  let waitRaw = await env.bbb.get("global_match_wait");
+  console.log("📖 KV读取结果：", waitRaw);
+
+  if (waitRaw) {
+    // 有人排队，直接配对
+    const waitUser = JSON.parse(waitRaw);
+    const targetSid = waitUser.sid;
+    const targetUser = userMap.get(targetSid);
+    console.log("✅ 找到排队用户：", targetSid);
+
+    // 清空KV（包ctx，防止丢失）
+    ctx.waitUntil(env.bbb.delete("global_match_wait"));
+    console.log("🗑️ 已清空排队池");
+
+    // 匹配初始化
+    cleanMatchTimer(sid);
+    cleanMatchTimer(targetSid);
+    user.partner = targetSid;
+    targetUser.partner = sid;
+    user.isMatched = true;
+    targetUser.isMatched = true;
+
+    // 创建房间
+    const rid = createMatchRoom(user.username, targetUser.username);
+    user.roomId = rid;
+    targetUser.roomId = rid;
+
+    // 拿昵称
+    const aNick = loginMap.get(user.username)?.nickname || user.username;
+    const bNick = loginMap.get(targetUser.username)?.nickname || targetUser.username;
+
+    // 前端匹配推送（字段精准）
+    user.socket.send(JSON.stringify({
+      type: "match-found",
+      data: { roomId: rid, partnerId: targetSid, partnerName: bNick }
+    }));
+    targetUser.socket.send(JSON.stringify({
+      type: "match-found",
+      data: { roomId: rid, partnerId: sid, partnerName: aNick }
+    }));
 
     // 保活绑定
     keepAliveMap.set(sid, { partnerId: targetSid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
     keepAliveMap.set(targetSid, { partnerId: sid, expireTime: Date.now() + KEEP_ALIVE_EXPIRE });
 
-    sysLog('MATCH', '✅ 跨实例真人匹配成功', { a: user.username, b: targetUser.username, room: rid });
+    console.log("🎉 跨实例匹配成功！", user.username, "↔", targetUser.username);
 
   } else {
-    // ✅ KV里没人排队，我进全局排队池（新增存储nickname，解决昵称空问题）
-    const userNick = loginMap.get(user.username)?.nickname || user.username;
+    // 没人排队，写入KV（强制包ctx，官方必加）
     const waitData = JSON.stringify({
       sid: sid,
-      username: user.username,
-      nickname: userNick
+      username: user.username
     });
-    // ✅ 修复4：加KV写入日志+异常捕获
-    try {
-      await kvPut(env, "global_match_wait", waitData);
-      sysLog('KV_DEBUG', '✅ 写入排队池成功', { 写入内容: waitData });
-    } catch (e) {
-      sysLog('KV_ERROR', '❌ 写入KV失败！！！', { 错误: e.message });
-      return;
-    }
+    ctx.waitUntil(env.bbb.put("global_match_wait", waitData));
+    console.log("✍️ 已写入KV排队池：", waitData);
 
-    // 15秒没人匹配，自动匹配AI（修复5：超时逻辑优化，先查再删）
+    // 15秒超时匹配AI
     const timer = setTimeout(async () => {
-      try {
-        const w = await kvGet(env, "global_match_wait");
-        if (w && JSON.parse(w).sid === sid) {
-          await kvDel(env, "global_match_wait");
-          sysLog('MATCH', '⏰ 超时，匹配AI');
-          assignAiRobot(sid);
-        }
-      } catch (e) {
-        sysLog('KV_ERROR', '❌ 超时检查KV失败', { 错误: e.message });
+      const w = await env.bbb.get("global_match_wait");
+      if (w && JSON.parse(w).sid === sid) {
+        ctx.waitUntil(env.bbb.delete("global_match_wait"));
+        console.log("⏰ 超时，自动匹配AI");
+        assignAiRobot(sid);
       }
     }, MATCH_TIMEOUT);
     userMatchTimer.set(sid, timer);
-
-    sysLog('MATCH', '⏳ 进入全局KV排队池', { user: user.username, sid: sid });
   }
 }
 
