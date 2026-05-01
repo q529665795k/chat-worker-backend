@@ -1,4 +1,4 @@
-// ====================== CF Worker + Durable Object 【终极完整闭环版｜登录/注册/匹配/聊天/心跳全补全】 ======================
+ // ====================== CF Worker + Durable Object 【终极完整闭环版｜登录/注册/匹配/聊天/心跳全补全】 ======================
 // 绑定严格对应：KV = bbb | DO = ChatDO | D1 = MY_MMM
 const KEEP_ALIVE_EXPIRE = 24 * 60 * 60 * 1000;
 const KEEP_ALIVE_CHECK_INTERVAL = 60 * 1000;
