@@ -17,8 +17,11 @@ id = "075caae527884570bad346b6c3cf5abf"
 
 
 [[durable_objects.bindings]]
-name = "CHATDO"
+name = "ChatDO"
 class_name = "ChatDO"
+id = "f521eb3afabf499889ac129004d7b41d"
+
+
 
 [[migrations]]
 tag = "v1"
