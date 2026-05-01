@@ -1244,6 +1244,38 @@ document.getElementById("saveBtn").onclick = function() {
     `;
   }
 }
+  }
+
+  // ========== 新增：图片/视频上传接口（精准修复上传失败）==========
+  async handleUpload(request) {
+    if (request.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    try {
+      const formData = await request.formData();
+      const file = formData.get("file");
+      if (!file) {
+        return new Response(JSON.stringify({ error: "无文件" }), { status: 400, headers: { "Content-Type": "application/json" } });
+      }
+      const uploadWorkerUrl = "https://b.im6.qzz.io/upload";
+      const forwardForm = new FormData();
+      forwardForm.append("file", file);
+      const res = await fetch(uploadWorkerUrl, {
+        method: "POST",
+        body: forwardForm
+      });
+      const result = await res.json();
+      return new Response(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      console.error("上传接口报错：", err);
+      return new Response(JSON.stringify({ error: "上传失败" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
+  }
+
+// ========== Worker 入口：分发请求｜绑定DO｜处理上传接口 ==========
+export default {
 
 // ========== Worker 入口：分发请求｜绑定DO｜处理上传接口 ==========
 export default {
