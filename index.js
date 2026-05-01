@@ -6,7 +6,8 @@ export class ChatDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.onlineClients = new Map(); // 格式：Map(ws连接, 昵称)
+    this.onlineClients = new Map();
+    this.onlineNicks = new Set();
   }
 
   async fetch(request) {
@@ -23,15 +24,17 @@ export class ChatDO {
     const nick = new URL(request.url).searchParams.get("nick") || "匿名";
     this.onlineClients.set(client, nick);
 
-    // 新用户上线 全员广播
-    this.broadcast({ type: "system", text: `${nick} 进入摸鱼基地` });
-    await this.updateOnline(1);
+    let isNewUser = false;
+    if (!this.onlineNicks.has(nick)) {
+      this.onlineNicks.add(nick);
+      isNewUser = true;
+      await this.updateOnline(1);
+      this.broadcast({ type: "system", text: `${nick} 进入摸鱼基地` });
+    }
 
-    // 接收消息
     client.addEventListener("message", async (e) => {
       const data = JSON.parse(e.data);
       await this.saveMsg(nick, data.content);
-      // 全员广播聊天消息
       this.broadcast({
         type: "chat",
         nick: nick,
@@ -40,18 +43,25 @@ export class ChatDO {
       });
     });
 
-    // 用户下线 全员广播
     client.addEventListener("close", async () => {
       const leaveNick = this.onlineClients.get(client);
       this.onlineClients.delete(client);
-      this.broadcast({ type: "system", text: `${leaveNick} 离开摸鱼基地` });
-      await this.updateOnline(-1);
+
+      let hasOtherClient = false;
+      this.onlineClients.forEach(n => {
+        if (n === leaveNick) hasOtherClient = true;
+      });
+
+      if (!hasOtherClient) {
+        this.onlineNicks.delete(leaveNick);
+        await this.updateOnline(-1);
+        this.broadcast({ type: "system", text: `${leaveNick} 离开摸鱼基地` });
+      }
     });
 
     return new Response(null, { status: 101, webSocket: server });
   }
 
-  // ✅ 【终极修复点】这里forEach顺序必须是 (ws, nick)！！！
   broadcast(data) {
     const msg = JSON.stringify(data);
     this.onlineClients.forEach((nick, ws) => {
@@ -92,6 +102,7 @@ export default {
   }
 };
 
+// ✅ 【核心修复：前端去重，彻底解决自己发两条消息】
 async function getHtml() {
   return `
 <!DOCTYPE html>
@@ -135,7 +146,8 @@ setInterval(()=>fetch("/api/online").then(r=>r.json()).then(d=>document.getEleme
 ws.onmessage = e=>{
   const d = JSON.parse(e.data);
   if(d.type==="system") chat.innerHTML+=\`<div class="system">\${d.text}</div>\`;
-  if(d.type==="chat") add(d.nick,d.content,false);
+  // ✅ 终极修复：自己发的消息，后端广播回来，前端不重复渲染！
+  if(d.type==="chat" && d.nick !== nick) add(d.nick,d.content,false);
   chat.scrollTop=chat.scrollHeight;
 };
 
@@ -143,6 +155,7 @@ send.onclick = ()=>{
   const c = txt.value.trim();
   if(!c)return;
   ws.send(JSON.stringify({content:c}));
+  // ✅ 只在这里渲染1次自己的消息
   add(nick,c,true);
   txt.value="";
 };
