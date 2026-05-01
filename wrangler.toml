@@ -17,10 +17,7 @@ binding = "nnn"
 service = "wandering-river-7d75"
 environment = "production"
 
-[[services]]
-binding = "cvvv"
-service = "jolly-disk-5d37"
-environment = "production"
+
 
 [[durable_objects.bindings]]
 name = "CHATDO"
