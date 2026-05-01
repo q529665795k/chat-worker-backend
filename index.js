@@ -822,8 +822,14 @@ function cancelMatch(){
 }
 function confirmMatch(){
     saveSwitches();
-    location.reload();
+    document.getElementById("matchModal").style.display = "none";
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "match_start" }));
+        document.getElementById("match").textContent = "取消匹配";
+        showSystemTip("正在匹配聊友...");
+    }
 }
+
 
 function openGalleryImage() { if (!partnerId) { alert("请先匹配"); return; } document.getElementById("galleryImage").click(); }
 function openGalleryVideo() { if (!partnerId) { alert("请先匹配"); return; } document.getElementById("galleryVideo").click(); }
