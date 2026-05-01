@@ -1,31 +1,30 @@
 name = "tiny-glade-72fa"
 main = "index.js"
 compatibility_date = "2026-04-30"
- 
+
+# 你的D1数据库（完全匹配）
 [[d1_databases]]
 binding = "MY_MMM"
 database_name = "mm"
 database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"
 preview_database_id = "e5400dde-3ef0-4d6e-ab99-0f68688d20b2"
 
+# 你的KV存储（完全匹配）
 [[kv_namespaces]]
 binding = "bbb"
 id = "075caae527884570bad346b6c3cf5abf"
 
-
-
-
-
+# 你的Durable Object（新版正确写法！删掉id！！）
 [[durable_objects.bindings]]
 name = "ChatDO"
 class_name = "ChatDO"
-id = "f521eb3afabf499889ac129004d7b41d"
 
-
-
+# DO迁移配置（保留）
 [[migrations]]
 tag = "v1"
 new_classes = ["ChatDO"]
+
+# 日志配置
 [observability]
 enabled = false
 head_sampling_rate = 1
@@ -41,5 +40,6 @@ enabled = false
 persist = true
 head_sampling_rate = 1
 
+# ✅ 修正：新版placement只认这三个，用smart自动选最快节点
 [placement]
-mode = "apac"
+mode = "smart"
