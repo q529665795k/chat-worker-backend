@@ -264,6 +264,15 @@ export class ChatDO extends DurableObject {
           this.autoJoinMatchPool(sid);
         }
 
+// 新增：重置匹配、换人功能
+if (data.type === "match_reset") {
+  this.waitingUsers.delete(sid);
+  this.cleanMatchTimer(sid);
+  this.stopChat(sid, true);
+  return;
+}
+
+        
         // 2. 发起匹配
         if (data.type === "match-chat") {
           if (!user.username) return;
@@ -813,22 +822,33 @@ window.onload = function() {
   document.getElementById("cameraVideo").onchange = (e) => sendMedia(e, "video");
 };
 
+// 弹出匹配确认框
 function showMatchModal(){
     if(!userId){alert("请先登录");return;}
     document.getElementById("matchModal").style.display = "flex";
 }
+
+// 取消匹配（弹窗里的取消）
 function cancelMatch(){
     document.getElementById("matchModal").style.display = "none";
 }
+
+// 确认匹配（核心！支持多次重新匹配、换人）
 function confirmMatch(){
     saveSwitches();
     document.getElementById("matchModal").style.display = "none";
+
     if (socket && socket.readyState === WebSocket.OPEN) {
+        // 关键：每次点匹配，先给后端发「重置当前聊天」，再发新匹配
+        socket.send(JSON.stringify({ type: "match_reset" }));
+        // 发起新匹配
         socket.send(JSON.stringify({ type: "match_start" }));
+        
         document.getElementById("match").textContent = "取消匹配";
         showSystemTip("正在匹配聊友...");
     }
 }
+
 
 
 function openGalleryImage() { if (!partnerId) { alert("请先匹配"); return; } document.getElementById("galleryImage").click(); }
