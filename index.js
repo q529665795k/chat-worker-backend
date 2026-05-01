@@ -1241,10 +1241,10 @@ document.getElementById("saveBtn").onclick = function() {
 </script>
 </body>
 </html>
-    `;
+  
   }
 }
-  }
+  
 
   // ========== 新增：图片/视频上传接口（精准修复上传失败）==========
   async handleUpload(request) {
@@ -1272,8 +1272,8 @@ document.getElementById("saveBtn").onclick = function() {
       console.error("上传接口报错：", err);
       return new Response(JSON.stringify({ error: "上传失败" }), { status: 500, headers: { "Content-Type": "application/json" } });
     }
-  }
 
+}
 // ========== Worker 入口：分发请求｜绑定DO｜处理上传接口 ==========
 export default {
 
