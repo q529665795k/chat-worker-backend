@@ -6,7 +6,7 @@ export class ChatDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.onlineClients = new Map();
+    this.onlineClients = new Map(); // 格式：Map(ws连接, 昵称)
   }
 
   async fetch(request) {
@@ -23,15 +23,24 @@ export class ChatDO {
     const nick = new URL(request.url).searchParams.get("nick") || "匿名";
     this.onlineClients.set(client, nick);
 
+    // 新用户上线 全员广播
     this.broadcast({ type: "system", text: `${nick} 进入摸鱼基地` });
     await this.updateOnline(1);
 
+    // 接收消息
     client.addEventListener("message", async (e) => {
       const data = JSON.parse(e.data);
       await this.saveMsg(nick, data.content);
-      this.broadcast({ type: "chat", nick, content: data.content, time: new Date().toLocaleTimeString() });
+      // 全员广播聊天消息
+      this.broadcast({
+        type: "chat",
+        nick: nick,
+        content: data.content,
+        time: new Date().toLocaleTimeString()
+      });
     });
 
+    // 用户下线 全员广播
     client.addEventListener("close", async () => {
       const leaveNick = this.onlineClients.get(client);
       this.onlineClients.delete(client);
@@ -42,9 +51,14 @@ export class ChatDO {
     return new Response(null, { status: 101, webSocket: server });
   }
 
+  // ✅ 【终极修复点】这里forEach顺序必须是 (ws, nick)！！！
   broadcast(data) {
     const msg = JSON.stringify(data);
-    this.onlineClients.forEach((_, ws) => ws.readyState === WebSocket.OPEN && ws.send(msg));
+    this.onlineClients.forEach((nick, ws) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
+      }
+    });
   }
 
   async saveMsg(nick, content) {
