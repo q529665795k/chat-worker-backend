@@ -296,22 +296,44 @@ export class ChatDO extends DurableObject {
         }
 
         if (data.type === "match_reset") {
-          this.waitingUsers.delete(sid);
-          this.cleanMatchTimer(sid);
-          this.stopChat(sid, true);
-          return;
-        }
+  // 【适配省电模式】全量强制重置，不留任何状态残留
+  this.waitingUsers.delete(sid);
+  this.cleanMatchTimer(sid);
+  this.stopChat(sid, true);
+  // 强制重置用户状态
+  user.isMatched = false;
+  user.partner = null;
+  user.roomId = null;
+  return;
+}
 
         if (data.type === "match-chat") {
-          if (!user.username) return;
-          if (user.isMatched) this.stopChat(sid, false);
-          this.waitingUsers.delete(sid);
-          this.cleanMatchTimer(sid);
-          this.waitingUsers.add(sid);
-          const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
-          this.userMatchTimer.set(sid, timer);
-          this.tryMatch();
-        }
+  // ============== 【适配省电模式】强制兜底清理，不管前端发没发重置，先清干净所有旧状态 ==============
+  // 1. 校验用户合法性
+  if (!user.username || !this.loginMap.has(user.username) || this.userSessionMap.get(user.username) !== sid) {
+    return;
+  }
+
+  // 2. 【核心兜底】强制结束该用户的所有旧聊天、旧匹配，不管之前是什么状态
+  this.waitingUsers.delete(sid); // 强制从等待池移除
+  this.cleanMatchTimer(sid); // 强制清除AI匹配定时器
+  this.stopChat(sid, true); // 强制结束当前所有聊天（包括AI）
+  // 3. 强制重置用户对象的所有匹配状态
+  user.isMatched = false;
+  user.partner = null;
+  user.roomId = null;
+  // ==============================================================================
+
+  // 4. 加入新的匹配池
+  this.waitingUsers.add(sid);
+  // 15秒没匹配到，分配AI机器人
+  const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
+  this.userMatchTimer.set(sid, timer);
+  // 5. 立即执行匹配
+  this.tryMatch();
+  return;
+}
+
 
         if (data.type === "stop-chat") {
           this.waitingUsers.delete(sid);
