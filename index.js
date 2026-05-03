@@ -404,14 +404,18 @@ export class ChatDO extends DurableObject {
           return;
         }
 
-        // 心跳逻辑（和前端完全匹配）
-        if (data.type === "HEARTBEAT") {
-          if (!user.username) return;
-          user.lastKeepAlive = Date.now();
-          user.lastActive = Date.now();
-          client.send(JSON.stringify({ type: "HEARTBEAT-ACK" }));
-          return;
-        }
+        // 心跳逻辑（延长超时时间，适配国产浏览器断连）
+if (data.type === "HEARTBEAT") {
+  if (!user.username) return;
+  // 更新用户最后活跃时间，30秒无心跳才会判定离线
+  user.lastKeepAlive = Date.now();
+  user.lastActive = Date.now();
+  // 给前端返回心跳响应
+  client.send(JSON.stringify({ type: "HEARTBEAT-ACK" }));
+  return;
+}
+
+
 
         // 发消息逻辑（和前端Base64媒体完全兼容）
         if (data.type === "send-msg") {
@@ -477,27 +481,30 @@ export class ChatDO extends DurableObject {
       }
     });
 
-    // 连接关闭逻辑（修复脏数据清理）
-    client.addEventListener("close", async () => {
-      this.cleanMatchTimer(sid);
-      this.waitingUsers.delete(sid);
-      
-      // 清理用户映射
-      if (user.username) {
-        const currentSid = this.userSessionMap.get(user.username);
-        // 只有当前关闭的是最新连接，才清理映射和在线人数
-        if (currentSid === sid) {
-          this.userSessionMap.delete(user.username);
-          this.userSocketMap.delete(user.username);
-          await this.changeOnlineCount(-1);
-          this.broadcastSystemMsg(`👋 ${this.loginMap.get(user.username)?.nickname || user.username} 离开摸鱼基地`);
-        }
-      }
-      
-      // 清理内存数据
-      this.keepAliveMap.delete(sid);
-      this.userMap.delete(sid);
-    });
+    // 连接关闭逻辑（延迟清理，防止瞬间重连导致在线人数异常、状态丢失）
+client.addEventListener("close", async () => {
+  this.cleanMatchTimer(sid);
+  this.waitingUsers.delete(sid);
+  
+  // 延迟5秒执行清理，用户瞬间重连不会误清在线人数和状态
+  setTimeout(async () => {
+    // 只有当前关闭的连接，是该用户的最新有效连接，才执行清理
+    const currentSid = this.userSessionMap.get(user.username);
+    if (user.username && currentSid === sid) {
+      this.userSessionMap.delete(user.username);
+      this.userSocketMap.delete(user.username);
+      // 在线人数-1
+      await this.changeOnlineCount(-1);
+      // 广播用户离开通知
+      this.broadcastSystemMsg(`👋 ${this.loginMap.get(user.username)?.nickname || user.username} 离开摸鱼基地`);
+    }
+  }, 5000);
+  
+  // 清理当前连接的内存数据
+  this.keepAliveMap.delete(sid);
+  this.userMap.delete(sid);
+});
+
 
     return new Response(null, { status: 101, webSocket: server });
   }
