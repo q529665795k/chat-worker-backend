@@ -301,7 +301,7 @@ export class ChatDO extends DurableObject {
         }
 
         if (data.type === "match_reset") {
-          this.waitingUsers.delete(sid);
+          
           this.cleanMatchTimer(sid);
           this.stopChat(sid, true);
           return;
