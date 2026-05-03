@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-
+ 
 // ========== 环境绑定（和你原配置完全一致，一字不动）==========
 const D1_BIND = "MY_MMM";
 const KV_BIND = "bbb";
