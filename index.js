@@ -24,7 +24,31 @@ export class ChatDO extends DurableObject {
     this.milestones = [2, 10, 100, 1000, 5000, 10000];
     this.triggeredMilestones = new Set();
     this.initOnlineCount();
-  }
+
+    // 【适配省电模式】定时兜底清理：每30秒清理一次超时的无效匹配状态
+setInterval(() => {
+  const now = Date.now();
+  // 1. 清理等待池里，超过60秒没动静的用户（前端冻住了，没发取消指令）
+  this.waitingUsers.forEach(sid => {
+    const u = this.userMap.get(sid);
+    if (!u || now - u.lastActive > 60000) {
+      this.waitingUsers.delete(sid);
+      this.cleanMatchTimer(sid);
+    }
+  });
+  // 2. 清理超过2分钟没心跳的用户匹配状态，防止锁死
+  this.userMap.forEach((u, sid) => {
+    if (now - u.lastKeepAlive > 120000) {
+      this.waitingUsers.delete(sid);
+      this.cleanMatchTimer(sid);
+      this.stopChat(sid, true);
+      u.isMatched = false;
+      u.partner = null;
+      u.roomId = null;
+    }
+  });
+}, 30000);
+
 
   // ========== CORS跨域处理（分离部署必加，已内置）==========
   addCorsHeaders(response) {
