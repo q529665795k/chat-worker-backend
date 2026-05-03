@@ -325,6 +325,13 @@ export class ChatDO extends DurableObject {
           user.lastActive = Date.now();
           client.send(JSON.stringify({ type: "HEARTBEAT-ACK" }));
         }
+       
+  if (data.type === "KEEP_ALIVE") {
+    if (!user.username) return;
+    user.lastKeepAlive = Date.now();
+    user.lastActive = Date.now();
+    return;
+  }
 
         if (data.type === "send-msg") {
           if (!user.username || !user.isMatched || !user.partner) return;
