@@ -48,7 +48,8 @@ setInterval(() => {
     }
   });
 }, 30000);
-
+     
+}
 
   // ========== CORS跨域处理（分离部署必加，已内置）==========
   addCorsHeaders(response) {
