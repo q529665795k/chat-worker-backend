@@ -333,6 +333,13 @@ setInterval(() => {
 }
 
         if (data.type === "match-chat") {
+
+           // ========== 强制清空该用户所有历史残留 ==========
+this.waitingUsers.delete(sid);
+this.cleanMatchTimer(sid);
+this.stopChat(sid, true);
+this.userMap.get(sid).isMatched = false;
+
   // ============== 【适配省电模式】强制兜底清理，不管前端发没发重置，先清干净所有旧状态 ==============
   // 1. 校验用户合法性
   if (!user.username || !this.loginMap.has(user.username) || this.userSessionMap.get(user.username) !== sid) {
