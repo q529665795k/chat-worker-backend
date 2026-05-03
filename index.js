@@ -1,4 +1,4 @@
-   import { DurableObject } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers";
 
 // ========== 环境绑定（和你原配置完全一致，一字不动）==========
 const D1_BIND = "MY_MMM";
@@ -24,32 +24,7 @@ export class ChatDO extends DurableObject {
     this.milestones = [2, 10, 100, 1000, 5000, 10000];
     this.triggeredMilestones = new Set();
     this.initOnlineCount();
-
-    // 【适配省电模式】定时兜底清理：每30秒清理一次超时的无效匹配状态
-setInterval(() => {
-  const now = Date.now();
-  // 1. 清理等待池里，超过60秒没动静的用户（前端冻住了，没发取消指令）
-  this.waitingUsers.forEach(sid => {
-    const u = this.userMap.get(sid);
-    if (!u || now - u.lastActive > 60000) {
-      this.waitingUsers.delete(sid);
-      this.cleanMatchTimer(sid);
-    }
-  });
-  // 2. 清理超过2分钟没心跳的用户匹配状态，防止锁死
-  this.userMap.forEach((u, sid) => {
-    if (now - u.lastKeepAlive > 120000) {
-      this.waitingUsers.delete(sid);
-      this.cleanMatchTimer(sid);
-      this.stopChat(sid, true);
-      u.isMatched = false;
-      u.partner = null;
-      u.roomId = null;
-    }
-  });
-}, 30000);
-     
-}
+  }
 
   // ========== CORS跨域处理（分离部署必加，已内置）==========
   addCorsHeaders(response) {
@@ -321,51 +296,22 @@ setInterval(() => {
         }
 
         if (data.type === "match_reset") {
-  // 【适配省电模式】全量强制重置，不留任何状态残留
-  this.waitingUsers.delete(sid);
-  this.cleanMatchTimer(sid);
-  this.stopChat(sid, true);
-  // 强制重置用户状态
-  user.isMatched = false;
-  user.partner = null;
-  user.roomId = null;
-  return;
-}
+          this.waitingUsers.delete(sid);
+          this.cleanMatchTimer(sid);
+          this.stopChat(sid, true);
+          return;
+        }
 
         if (data.type === "match-chat") {
-
-           // ========== 强制清空该用户所有历史残留 ==========
-this.waitingUsers.delete(sid);
-this.cleanMatchTimer(sid);
-this.stopChat(sid, true);
-this.userMap.get(sid).isMatched = false;
-
-  // ============== 【适配省电模式】强制兜底清理，不管前端发没发重置，先清干净所有旧状态 ==============
-  // 1. 校验用户合法性
-  if (!user.username || !this.loginMap.has(user.username) || this.userSessionMap.get(user.username) !== sid) {
-    return;
-  }
-
-  // 2. 【核心兜底】强制结束该用户的所有旧聊天、旧匹配，不管之前是什么状态
-  this.waitingUsers.delete(sid); // 强制从等待池移除
-  this.cleanMatchTimer(sid); // 强制清除AI匹配定时器
-  this.stopChat(sid, true); // 强制结束当前所有聊天（包括AI）
-  // 3. 强制重置用户对象的所有匹配状态
-  user.isMatched = false;
-  user.partner = null;
-  user.roomId = null;
-  // ==============================================================================
-
-  // 4. 加入新的匹配池
-  this.waitingUsers.add(sid);
-  // 15秒没匹配到，分配AI机器人
-  const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
-  this.userMatchTimer.set(sid, timer);
-  // 5. 立即执行匹配
-  this.tryMatch();
-  return;
-}
-
+          if (!user.username) return;
+          if (user.isMatched) this.stopChat(sid, false);
+          this.waitingUsers.delete(sid);
+          this.cleanMatchTimer(sid);
+          this.waitingUsers.add(sid);
+          const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
+          this.userMatchTimer.set(sid, timer);
+          this.tryMatch();
+        }
 
         if (data.type === "stop-chat") {
           this.waitingUsers.delete(sid);
@@ -379,13 +325,6 @@ this.userMap.get(sid).isMatched = false;
           user.lastActive = Date.now();
           client.send(JSON.stringify({ type: "HEARTBEAT-ACK" }));
         }
-       
-  if (data.type === "KEEP_ALIVE") {
-    if (!user.username) return;
-    user.lastKeepAlive = Date.now();
-    user.lastActive = Date.now();
-    return;
-  }
 
         if (data.type === "send-msg") {
           if (!user.username || !user.isMatched || !user.partner) return;
