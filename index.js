@@ -1,5 +1,5 @@
- import { DurableObject } from "cloudflare:workers";
- 
+import { DurableObject } from "cloudflare:workers";
+
 // ========== 环境绑定（和你原配置完全一致，一字不动）==========
 const D1_BIND = "MY_MMM";
 const KV_BIND = "bbb";
@@ -92,18 +92,15 @@ export class ChatDO extends DurableObject {
 
   // ========== HTTP请求分发（纯后端路由，无前端返回）==========
   async fetch(request) {
-    // 优先处理跨域预检请求
     if (request.method === "OPTIONS") {
       return this.handleOptions();
     }
 
     const url = new URL(request.url);
-    // WebSocket聊天接口
     if (url.pathname === "/ws") {
       const res = await this.handleWS(request);
       return this.addCorsHeaders(res);
     }
-    // 账号相关接口
     if (url.pathname === "/login") {
       const res = await this.handleLogin(request);
       return this.addCorsHeaders(res);
@@ -116,7 +113,6 @@ export class ChatDO extends DurableObject {
       const res = await this.handleUpdateNick(request);
       return this.addCorsHeaders(res);
     }
-    // 用户&在线人数接口
     if (url.pathname === "/api/get_user_info") {
       const res = await this.handleGetUserInfo(request);
       return this.addCorsHeaders(res);
@@ -125,13 +121,11 @@ export class ChatDO extends DurableObject {
       const res = await this.handleGetOnline();
       return this.addCorsHeaders(res);
     }
-    // 图片/视频上传接口
     if (url.pathname === "/upload") {
       const res = await this.handleUpload(request);
       return this.addCorsHeaders(res);
     }
 
-    // 兜底：非接口请求返回404
     return this.addCorsHeaders(new Response("API Service Running", { status: 200 }));
   }
 
@@ -248,7 +242,6 @@ export class ChatDO extends DurableObject {
     return new Response(JSON.stringify({ code: 200, msg: "修改成功", data: { oldNickname: oldNick, newNickname: newNickname } }), { headers: { "Content-Type": "application/json" } });
   }
 
-  // ========== 用户信息/在线人数接口 ==========
   async handleGetUserInfo(request) {
     await this.initDB();
     const userId = new URL(request.url).searchParams.get("user_id");
@@ -263,14 +256,13 @@ export class ChatDO extends DurableObject {
     return new Response(JSON.stringify({ online: this.onlineCount }), { headers: { "Content-Type": "application/json" } });
   }
 
-  // ========== WebSocket聊天核心（核心修改：加用户状态锁，解决串线+重连匹配）==========
+  // ========== WebSocket聊天核心（已修复匹配BUG）==========
   async handleWS(request) {
     await this.initDB();
     const [client, server] = new WebSocketPair();
     client.accept();
     const sid = crypto.randomUUID();
     
-    // ===================== 【新增1：初始化用户状态锁】 =====================
     const user = {
       id: sid,
       socket: client,
@@ -280,7 +272,6 @@ export class ChatDO extends DurableObject {
       lastActive: Date.now(),
       lastKeepAlive: Date.now(),
       roomId: null,
-      // 👇 新增状态锁，和我们约定的完全一致
       inRoomId: null,
       roomType: null
     };
@@ -300,28 +291,27 @@ export class ChatDO extends DurableObject {
           this.autoJoinMatchPool(sid);
         }
 
+        // ===================== 【修复1：match_reset 彻底清空状态】 =====================
         if (data.type === "match_reset") {
-          
           this.cleanMatchTimer(sid);
+          this.waitingUsers.delete(sid); // 关键修复：从队列删除
           this.stopChat(sid, true);
+          user.isMatched = false; // 关键修复：重置匹配状态
+          user.inRoomId = null;   // 关键修复：清空房间锁
           return;
         }
 
+        // ===================== 【修复2：match-chat 允许重新匹配】 =====================
         if (data.type === "match-chat") {
-          // ===================== 【新增2：匹配入口拦截（核心！禁止重复匹配）】 =====================
-          // 只要用户inRoomId不为空（正在聊天），直接拒绝匹配，根治串线！
-          if (user.inRoomId !== null) {
-            client.send(JSON.stringify({
-              type: "match_error",
-              msg: "你正在聊天中，无法发起新匹配"
-            }));
-            return;
-          }
-
           if (!user.username) return;
-          if (user.isMatched) this.stopChat(sid, false);
-          this.waitingUsers.delete(sid);
+          
+          // 彻底清空旧状态
           this.cleanMatchTimer(sid);
+          this.waitingUsers.delete(sid);
+          user.isMatched = false;
+          user.inRoomId = null;
+
+          // 重新加入匹配
           this.waitingUsers.add(sid);
           const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
           this.userMatchTimer.set(sid, timer);
@@ -412,7 +402,7 @@ export class ChatDO extends DurableObject {
     return new Response(null, { status: 101, webSocket: server });
   }
 
-  // ========== AI调用/匹配逻辑/房间管理（核心修改：匹配成功+退出时同步状态锁）==========
+  // ========== AI调用/匹配逻辑/房间管理（已修复）==========
   async callAI(prompt) {
     try {
       const res = await fetch("https://useavnmd-mm.hf.space/api/chat", {
@@ -437,35 +427,35 @@ export class ChatDO extends DurableObject {
     return roomId;
   }
 
+  // ===================== 【修复3：stopChat 彻底重置】 =====================
   stopChat(sid, isInitiative = true) {
     const me = this.userMap.get(sid);
-    if (!me || !me.partner) return;
+    if (!me) return;
+    
     this.cleanMatchTimer(sid);
-    if (me.partner !== "ai_bot") {
+    this.waitingUsers.delete(sid); // 关键修复
+    
+    if (me.partner && me.partner !== "ai_bot") {
       const partner = this.userMap.get(me.partner);
       if (partner && partner.socket) {
         partner.partner = null;
         partner.isMatched = false;
+        partner.inRoomId = null;
         partner.socket.send(JSON.stringify({ type: "partner-leave" }));
         me.roomId && partner.socket.send(JSON.stringify({ type: "clear-chat-record" }));
-        this.autoJoinMatchPool(partner.id);
       }
     }
+
+    // 彻底清空自己状态
     me.partner = null;
     me.isMatched = false;
+    me.inRoomId = null;
+    me.roomId = null;
+    
     me.socket.send(JSON.stringify({ type: "match-end", info: isInitiative ? "已断开" : "结束" }));
     this.keepAliveMap.delete(sid);
-    
-    // ===================== 【新增4：退出聊天，清空状态锁】 =====================
-    if (me.roomId) {
-      this.roomMem.delete(me.roomId);
-      this.offlineMsgMem.delete(me.username);
-      me.roomId = null;
-      // 重置状态，允许重新匹配
-      me.inRoomId = null;
-      me.roomType = null;
-    }
-    this.autoJoinMatchPool(me.id);
+    this.roomMem.delete(me.roomId);
+    this.offlineMsgMem.delete(me.username);
   }
 
   cleanMatchTimer(sid) {
@@ -485,7 +475,6 @@ export class ChatDO extends DurableObject {
     u.partner = aiId;
     u.isMatched = true;
     u.roomId = rid;
-    // ===================== 【新增3：匹配成功，标记状态锁】 =====================
     u.inRoomId = rid;
     u.roomType = "ai";
 
@@ -500,11 +489,18 @@ export class ChatDO extends DurableObject {
     }));
   }
 
+  // ===================== 【修复4：autoJoinMatchPool 宽松允许重入】 =====================
   autoJoinMatchPool(sid) {
     const u = this.userMap.get(sid);
-    // ✅ 关键优化：重连回来后，**只判断用户是否空闲（inRoomId为null）**，空闲就正常进池，保证切后台回来能正常匹配！
-    if (!u || !u.socket || !u.username || !this.loginMap.has(u.username) || this.userSessionMap.get(u.username) !== sid || u.isMatched || this.waitingUsers.has(sid) || u.inRoomId !== null) return;
+    if (!u || !u.socket || !u.username) return;
+    
+    // 关键修复：只要空闲就允许进池
+    if (u.isMatched || u.inRoomId) return;
+    
+    this.waitingUsers.delete(sid);
+    this.cleanMatchTimer(sid);
     this.waitingUsers.add(sid);
+    
     const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
     this.userMatchTimer.set(sid, timer);
     this.tryMatch();
@@ -513,24 +509,26 @@ export class ChatDO extends DurableObject {
   tryMatch() {
     const list = Array.from(this.waitingUsers)
       .map(id => this.userMap.get(id))
-      .filter(u => u && u.socket && !u.partner && u.username && this.loginMap.has(u.username) && this.userSessionMap.get(u.username) === u.id);
+      .filter(u => u && u.socket && !u.partner && u.username);
     if (list.length < 2) return;
     for (let i = 0; i < list.length - 1; i += 2) {
       const a = list[i];
       const b = list[i + 1];
       if (!a || !b || a.id === b.id) continue;
+      
       this.cleanMatchTimer(a.id);
       this.cleanMatchTimer(b.id);
       this.waitingUsers.delete(a.id);
       this.waitingUsers.delete(b.id);
+      
       a.partner = b.id;
       b.partner = a.id;
       a.isMatched = true;
       b.isMatched = true;
+      
       const rid = this.createMatchRoom(a.username, b.username);
       a.roomId = rid;
       b.roomId = rid;
-      // ===================== 【新增3：真人匹配成功，标记状态锁】 =====================
       a.inRoomId = rid;
       a.roomType = "human";
       b.inRoomId = rid;
@@ -538,14 +536,16 @@ export class ChatDO extends DurableObject {
 
       const aNick = this.loginMap.get(a.username)?.nickname || a.username;
       const bNick = this.loginMap.get(b.username)?.nickname || b.username;
+      
       a.socket.send(JSON.stringify({ type: "match-found", partnerId: b.id, partnerName: bNick, selfId: a.id, roomId: rid }));
       b.socket.send(JSON.stringify({ type: "match-found", partnerId: a.id, partnerName: aNick, selfId: b.id, roomId: rid }));
+      
       this.keepAliveMap.set(a.id, { partnerId: b.id, expireTime: Date.now() + 24 * 60 * 60 * 1000 });
       this.keepAliveMap.set(b.id, { partnerId: a.id, expireTime: Date.now() + 24 * 60 * 60 * 1000 });
     }
   }
 
-  // ========== 图片/视频上传接口（原逻辑保留，加错误处理）==========
+  // ========== 图片/视频上传接口 ==========
   async handleUpload(request) {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
@@ -582,7 +582,7 @@ export class ChatDO extends DurableObject {
   }
 }
 
-// ========== Worker 入口（原绑定逻辑完全一致）==========
+// ========== Worker 入口 ==========
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
