@@ -1,4 +1,4 @@
-  import { DurableObject } from "cloudflare:workers";
+ import { DurableObject } from "cloudflare:workers";
 
 // ========== 环境绑定（和你原配置完全一致，一字不动）==========
 const D1_BIND = "MY_MMM";
@@ -25,11 +25,6 @@ export class ChatDO extends DurableObject {
     this.usernameToSocket = new Map();
     this.milestones = [2, 10, 100, 1000, 5000, 10000];
     this.triggeredMilestones = new Set();
-// 离线计时（前后台切换用）
-this.userOfflineTime = new Map(); // 存用户最后离线时间
-this.OFFLINE_LIMIT = 25 * 60 * 1000; // 25分钟阈值
-
-   
     this.initOnlineCount();
   }
 
@@ -287,15 +282,6 @@ this.OFFLINE_LIMIT = 25 * 60 * 1000; // 25分钟阈值
     client.addEventListener("message", async (e) => {
       try {
         const data = JSON.parse(e.data);
-
-       // 【新增】前端切后台上报离线 → 后端记录离线时间
-if (data.type === "USER_OFFLINE_REPORT") {
-  if (user.username) {
-    this.userOfflineTime.set(user.username, Date.now());
-  }
-  return;
-}
-
         if (data.type === "user-online") {
           const { username } = data;
           if (!username || !this.loginMap.has(username)) return;
@@ -305,26 +291,6 @@ if (data.type === "USER_OFFLINE_REPORT") {
           await this.changeOnlineCount(1);
           this.broadcastSystemMsg(`👋 ${this.loginMap.get(username).nickname} 进入摸鱼基地`);
           this.autoJoinMatchPool(sid);
-      // ========== 【第三段：离线时长判断 25分钟阈值】 ==========
-const now = Date.now();
-const lastOffline = this.userOfflineTime.get(username);
-let needReset = false;
-
-// 判断是否离线超过25分钟
-if (lastOffline && now - lastOffline >= this.OFFLINE_LIMIT) {
-  needReset = true;
-  this.userOfflineTime.delete(username); // 清除过期离线记录
-}
-
-// 给前端发指令：重置 or 续连
-if (needReset) {
-  client.send(JSON.stringify({ type: "FORCE_RESET" }));
-} else {
-  client.send(JSON.stringify({ type: "RESUME_CONNECT" }));
-}
-// ======================================================
-
-        
         }
 
         // ===================== 【修复1：match_reset 彻底清空状态】 =====================
