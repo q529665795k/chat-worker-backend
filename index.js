@@ -6,6 +6,8 @@ const KV_BIND = "bbb";
 const DO_BIND = "ChatDO";
 // ========== 前端域名配置（填你Pages绑定的域名，解决跨域）==========
 const FRONTEND_DOMAIN = "https://im6.qzz.io";
+// 新增：对方离线超时判定（30分钟，和前端5分钟心跳匹配）
+const PARTNER_TIMEOUT = 1800000;
 
 // ========== 核心Durable Object（原逻辑100%保留，仅修复匹配互斥+重连逻辑）==========
 export class ChatDO extends DurableObject {
@@ -381,6 +383,26 @@ export class ChatDO extends DurableObject {
           }
           client.send(JSON.stringify({ type: "clear-chat-record" }));
         }
+
+       // ========== 新增：切回前台检查（只单发，不广播，省Worker） ==========
+if (data.type === "i_am_back") {
+  if (!user.isMatched || !user.partner || !user.roomId) return;
+
+  const partner = this.userMap.get(user.partner);
+  const isPartnerOffline = !partner || (Date.now() - partner.lastActive > PARTNER_TIMEOUT);
+
+  if (isPartnerOffline) {
+    this.stopChat(user.id, false);
+
+    // ✅ 只发给自己，不广播
+    user.socket.send(JSON.stringify({
+      type: "self_tips",
+      content: "对方已离线，已为你重置匹配"
+    }));
+  }
+  return;
+}
+
       } catch (err) {
         console.error("WS消息处理失败：", err);
       }
