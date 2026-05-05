@@ -145,7 +145,7 @@ export class ChatDO extends DurableObject {
     )
     `).run();
     await this.env[D1_BIND].prepare(`
-    CREATE TABLE IF NOT EXISTS messages (
+        (          
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sender TEXT NOT NULL,
       receiver TEXT NOT NULL,
@@ -364,9 +364,7 @@ export class ChatDO extends DurableObject {
               msgId: data.msgId || "",
               msgType: data.msgType || "text"
             }));
-            await this.env[D1_BIND].prepare("INSERT INTO messages (sender,receiver,content,msg_type) VALUES (?,?,?,?)")
-              .bind(user.username, partner.username, data.content, data.msgType || "text")
-              .run();
+            
           }
         }
 
