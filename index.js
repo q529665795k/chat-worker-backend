@@ -144,7 +144,7 @@ export class ChatDO extends DurableObject {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     `).run();
-    await this.env[D1_BIND].prepare(`
+    /*await this.env[D1_BIND].prepare(`
         (          
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sender TEXT NOT NULL,
@@ -155,7 +155,7 @@ export class ChatDO extends DurableObject {
       file_size INTEGER,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
-    `).run();
+    `).run();*/
     await this.env[D1_BIND].prepare(`
     CREATE TABLE IF NOT EXISTS nickname_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -365,6 +365,9 @@ export class ChatDO extends DurableObject {
               msgType: data.msgType || "text"
             }));
             
+          await this.env[D1_BIND].prepare("INSERT INTO messages (sender,receiver,content,msg_type) VALUES (?,?,?,?)")
+              .bind(user.username, partner.username, data.content, data.msgType || "text")
+              .run();
           }
         }
 
