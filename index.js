@@ -144,18 +144,8 @@ export class ChatDO extends DurableObject {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     `).run();
-    await this.env[D1_BIND].prepare(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sender TEXT NOT NULL,
-      receiver TEXT NOT NULL,
-      content TEXT,
-      msg_type TEXT DEFAULT 'text',
-      file_name TEXT,
-      file_size INTEGER,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    `).run();
+    
+    
     await this.env[D1_BIND].prepare(`
     CREATE TABLE IF NOT EXISTS nickname_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -378,9 +368,7 @@ export class ChatDO extends DurableObject {
         }
 
         if (data.type === "clear-chat") {
-          if (user.username) {
-            await this.env[D1_BIND].prepare("DELETE FROM messages WHERE sender=? OR receiver=?").bind(user.username, user.username).run();
-          }
+          
           client.send(JSON.stringify({ type: "clear-chat-record" }));
         }
 
