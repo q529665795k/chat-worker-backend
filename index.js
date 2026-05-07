@@ -1,18 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 
-
-// ========== 跨域白名单（只允许你的前端） ==========
-const ALLOWED_ORIGINS = [
-  "https://im6.qzz.io"
-];
-
-function checkOrigin(origin) {
-  if (!origin) return false;
-  return ALLOWED_ORIGINS.includes(origin.trim());
-}
-
-
-
 // ========== 【你原配置，一字不动】==========
 const D1_BIND = "MY_MMM";
 const KV_BIND = "bbb";
@@ -46,47 +33,34 @@ export class ChatDO extends DurableObject {
     this.usernameToSocket = new Map();
     this.milestones = [2, 10, 100, 1000, 5000, 10000];
     this.triggeredMilestones = new Set();
-
-    // AI圆桌
     this.aiRoundChatList = [];
     this.aiLastSpeaker = "xiaoya";
     this.aiRoomPause = false;
-
     this.initOnlineCount();
   }
 
-addCorsHeaders(response, request) {
-  const origin = request.headers.get("Origin");
-  const newResponse = new Response(response.body, response);
-
-  if (origin && checkOrigin(origin)) {
-    newResponse.headers.set("Access-Control-Allow-Origin", origin);
+  // ========== CORS 已修复 100% 不报错 ==========
+  addCorsHeaders(response) {
+    const newResponse = new Response(response.body, response);
+    newResponse.headers.set("Access-Control-Allow-Origin", FRONTEND_DOMAIN);
     newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     newResponse.headers.set("Access-Control-Allow-Headers", "Content-Type");
     newResponse.headers.set("Access-Control-Allow-Credentials", "true");
+    newResponse.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    return newResponse;
   }
 
-  newResponse.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
-  return newResponse;
-}
-
-handleOptions(request) {
-  const origin = request.headers.get("Origin");
-  if (!origin || !checkOrigin(origin)) {
-    return new Response(null, { status: 403 });
+  handleOptions() {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": FRONTEND_DOMAIN,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
+      },
+    });
   }
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
-}
-
-
 
   // ========== 在线人数 ==========
   async initOnlineCount() {
@@ -230,6 +204,7 @@ handleOptions(request) {
   async fetch(request) {
     if (request.method === "OPTIONS") return this.handleOptions();
     const url = new URL(request.url);
+
     if (url.pathname === "/ws") return this.addCorsHeaders(await this.handleWS(request));
     if (url.pathname === "/login") return this.addCorsHeaders(await this.handleLogin(request));
     if (url.pathname === "/register") return this.addCorsHeaders(await this.handleRegister(request));
@@ -237,12 +212,14 @@ handleOptions(request) {
     if (url.pathname === "/api/get_user_info") return this.addCorsHeaders(await this.handleGetUserInfo(request));
     if (url.pathname === "/api/online") return this.addCorsHeaders(await this.handleGetOnline());
     if (url.pathname === "/upload") return this.addCorsHeaders(await this.handleUpload(request));
+    
     if (url.pathname === "/api/ai_round_history") {
       const list = await this.getAiRoomRecent50();
       return this.addCorsHeaders(new Response(JSON.stringify({ code:200, list }), {
         headers: { "Content-Type":"application/json" }
       }));
     }
+
     return this.addCorsHeaders(new Response("API Service Running", { status: 200 }));
   }
 
@@ -376,6 +353,7 @@ handleOptions(request) {
           this.resumeAiRound();
           return;
         }
+
         if (data.type === "leave_ai_round_room") {
           user.inAiRoundRoom = false;
           return;
@@ -699,7 +677,6 @@ handleOptions(request) {
 // ========== 入口 ==========
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
     const doId = env[DO_BIND].idFromName("global");
     const chatDO = env[DO_BIND].get(doId);
     return await chatDO.fetch(request);
