@@ -534,32 +534,112 @@ export class ChatDO extends DurableObject {
     return roomId;
   }
 
+    // ========== 匹配逻辑（修复双重匹配）==========
   stopChat(sid, isInitiative = true) {
     const me = this.userMap.get(sid);
     if (!me) return;
     
-    this.cleanMatchTimer(sid);
+    // 先清除所有定时器和队列
     this.waitingUsers.delete(sid);
-    
+    if (this.userMatchTimer.has(sid)) {
+      clearTimeout(this.userMatchTimer.get(sid));
+      this.userMatchTimer.delete(sid);
+    }
+
     if (me.partner && me.partner !== "ai_bot") {
       const partner = this.userMap.get(me.partner);
       if (partner && partner.socket) {
         partner.partner = null;
         partner.isMatched = false;
-        partner.inRoomId = null;
         partner.socket.send(JSON.stringify({ type: "partner-leave" }));
-        me.roomId && partner.socket.send(JSON.stringify({ type: "clear-chat-record" }));
       }
     }
     me.partner = null;
     me.isMatched = false;
-    me.inRoomId = null;
-    me.roomId = null;
-    
     me.socket.send(JSON.stringify({ type: "match-end", info: isInitiative ? "已断开" : "结束" }));
-    this.keepAliveMap.delete(sid);
-    this.roomMem.delete(me.roomId);
-    this.offlineMsgMem.delete(me.username);
+  }
+
+  assignAiRobot(sid) {
+    const u = this.userMap.get(sid);
+    // 关键修复：已经匹配的用户，直接跳过AI分配
+    if (!u || u.isMatched || !this.waitingUsers.has(sid)) return;
+    this.waitingUsers.delete(sid);
+    if (this.userMatchTimer.has(sid)) {
+      clearTimeout(this.userMatchTimer.get(sid));
+      this.userMatchTimer.delete(sid);
+    }
+    u.partner = "ai_bot";
+    u.isMatched = true;
+    u.socket.send(JSON.stringify({
+      type: "match-found",
+      partnerId: "ai_bot",
+      partnerName: "AI陪伴者",
+      selfId: sid
+    }));
+  }
+
+  autoJoinMatchPool(sid) {
+    const u = this.userMap.get(sid);
+    if (!u || !u.username || u.isMatched) return;
+    this.waitingUsers.add(sid);
+    const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
+    this.userMatchTimer.set(sid, timer);
+    this.tryMatch();
+  }
+
+  tryMatch() {
+    const list = Array.from(this.waitingUsers)
+      .map(id => this.userMap.get(id))
+      .filter(u => u && u.socket && !u.partner && u.username && !u.isMatched);
+    if (list.length < 2) return;
+    for (let i = 0; i < list.length - 1; i += 2) {
+      const a = list[i];
+      const b = list[i + 1];
+      if (!a || !b || a.id === b.id) continue;
+      
+      // 关键修复：匹配成功后，直接从队列移除并清除定时器
+      this.waitingUsers.delete(a.id);
+      this.waitingUsers.delete(b.id);
+      if (this.userMatchTimer.has(a.id)) {
+        clearTimeout(this.userMatchTimer.get(a.id));
+        this.userMatchTimer.delete(a.id);
+      }
+      if (this.userMatchTimer.has(b.id)) {
+        clearTimeout(this.userMatchTimer.get(b.id));
+        this.userMatchTimer.delete(b.id);
+      }
+      
+      a.partner = b.id;
+      b.partner = a.id;
+      a.isMatched = true;
+      b.isMatched = true;
+      
+      const aNick = this.loginMap.get(a.username)?.nickname || a.username;
+      const bNick = this.loginMap.get(b.username)?.nickname || b.username;
+      
+      a.socket.send(JSON.stringify({ type: "match-found", partnerId: b.id, partnerName: bNick, selfId: a.id }));
+      b.socket.send(JSON.stringify({ type: "match-found", partnerId: a.id, partnerName: aNick, selfId: b.id }));
+    }
+  }
+
+  // ========== AI 回复（修复兜底，直接用固定文案测试）==========
+  async callAiReply(prompt) {
+    // 先加一层保护，防止没绑AI的时候报错
+    if (!this.env.AI) {
+      return "AI未绑定，只能陪你打个招呼啦~";
+    }
+    try {
+      const messages = [
+        { role: "system", content: "你是一个简短回复的聊天助手，说话接地气，不啰嗦，一句话以内回答。" },
+        { role: "user", content: prompt }
+      ];
+      const res = await this.env.AI.run("@cf/qwen/qwen1.5-1.8b-chat", { messages });
+      return res?.response || "我有点累了，稍后再聊吧~";
+    } catch (e) {
+      console.error("AI调用失败：", e);
+      // 改成固定的测试文案，一眼就能知道是触发了错误
+      return "调用AI失败，这是兜底回复：收到！";
+    }
   }
 
   cleanMatchTimer(sid) {
