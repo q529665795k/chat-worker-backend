@@ -426,33 +426,34 @@ if (data.type === "i_am_back") {
   }
 
   // ========== AI调用/匹配逻辑/房间管理（已修复）==========
-  async callAI(prompt) {
-    try {
+async callAI(prompt) {
+  try {
     const res = await fetch("https://nihilismlll-longg.hf.space/api/chat", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ 
-    model: "Qwen/Qwen2-1.5B-Instruct", 
-    messages: [{ role: "user", content: prompt }], 
-    stream: false 
-  }),
-  signal: AbortSignal.timeout(15000)
-});
-if (!res.ok) throw new Error("AI接口响应异常");
-const data = await res.json();
-return data.message?.content || "爸爸～在呢😘";
-} catch (e) {
-  console.error("AI调用失败：", e);
-  return "爸爸～我掉线啦🥺";
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 
+        model: "Qwen/Qwen2-1.5B-Instruct", 
+        messages: [{ role: "user", content: prompt }], 
+        stream: false 
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!res.ok) throw new Error("AI接口响应异常");
+    const data = await res.json();
+    return data.message?.content || "爸爸～在呢😘";
+  } catch (e) {
+    console.error("AI调用失败：", e);
+    return "爸爸～我掉线啦🥺";
+  }
 }
 
+createMatchRoom(userA, userB) {
+  const roomId = `room_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  this.roomMem.set(roomId, { userA, userB, userALeft: false, userBLeft: false, createTime: Date.now() });
+  setTimeout(() => this.roomMem.delete(roomId), 7200 * 1000);
+  return roomId;
+}
 
-  createMatchRoom(userA, userB) {
-    const roomId = `room_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-    this.roomMem.set(roomId, { userA, userB, userALeft: false, userBLeft: false, createTime: Date.now() });
-    setTimeout(() => this.roomMem.delete(roomId), 7200 * 1000);
-    return roomId;
-  }
 
   // ===================== 【修复3：stopChat 彻底重置】 =====================
   stopChat(sid, isInitiative = true) {
