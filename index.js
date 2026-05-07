@@ -1,5 +1,18 @@
 import { DurableObject } from "cloudflare:workers";
 
+
+// ========== 跨域白名单（只允许你的前端） ==========
+const ALLOWED_ORIGINS = [
+  "https://im6.qzz.io"
+];
+
+function checkOrigin(origin) {
+  if (!origin) return false;
+  return ALLOWED_ORIGINS.includes(origin.trim());
+}
+
+
+
 // ========== 【你原配置，一字不动】==========
 const D1_BIND = "MY_MMM";
 const KV_BIND = "bbb";
@@ -42,21 +55,10 @@ export class ChatDO extends DurableObject {
     this.initOnlineCount();
   }
 
-  // ========== 跨域白名单（只允许你的前端） ==========
-const ALLOWED_ORIGINS = [
-  "https://im6.qzz.io"
-];
-
-function checkOrigin(origin) {
-  if (!origin) return false;
-  return ALLOWED_ORIGINS.includes(origin.trim());
-}
-
 addCorsHeaders(response, request) {
   const origin = request.headers.get("Origin");
   const newResponse = new Response(response.body, response);
 
-  // 只有在白名单里的 Origin 才会被放行
   if (origin && checkOrigin(origin)) {
     newResponse.headers.set("Access-Control-Allow-Origin", origin);
     newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -83,6 +85,7 @@ handleOptions(request) {
     },
   });
 }
+
 
 
   // ========== 在线人数 ==========
