@@ -623,24 +623,26 @@ export class ChatDO extends DurableObject {
   }
 
   // ========== AI 回复（修复兜底，直接用固定文案测试）==========
-  async callAiReply(prompt) {
-    // 先加一层保护，防止没绑AI的时候报错
-    if (!this.env.AI) {
-      return "AI未绑定，只能陪你打个招呼啦~";
-    }
-    try {
-      const messages = [
-        { role: "system", content: "你是一个简短回复的聊天助手，说话接地气，不啰嗦，一句话以内回答。" },
-        { role: "user", content: prompt }
-      ];
-      const res = await this.env.AI.run("@cf/qwen/qwen1.5-1.8b-chat", { messages });
-      return res?.response || "我有点累了，稍后再聊吧~";
-    } catch (e) {
-      console.error("AI调用失败：", e);
-      // 改成固定的测试文案，一眼就能知道是触发了错误
-      return "调用AI失败，这是兜底回复：收到！";
-    }
+async callAiReply(prompt) {
+  // 先判断AI是否绑定，防止报错
+  if (!this.env.AI) {
+    return "AI未绑定，只能陪你打个招呼啦~";
   }
+  try {
+    const messages = [
+      { role: "system", content: "你是一个简短回复的聊天助手，说话接地气，不啰嗦，一句话以内回答。" },
+      { role: "user", content: prompt }
+    ];
+    // 官方稳定可用的模型名
+    const res = await this.env.AI.run("@cf/qwen/qwen1.5-0.5b-chat", { messages });
+    return res?.response || "我有点累了，稍后再聊吧~";
+  } catch (e) {
+    console.error("AI调用失败：", e);
+    // 改成固定测试文案，一眼就能定位问题
+    return "调用AI失败，这是兜底回复：收到！";
+  }
+}
+
 
   cleanMatchTimer(sid) {
     if (this.userMatchTimer.has(sid)) {
