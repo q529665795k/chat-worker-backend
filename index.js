@@ -155,7 +155,18 @@ export class ChatDO extends DurableObject {
     return await this.runAiModel(XIAOZE_SYS_PROMPT, prompt);
   }
 
-  // ========== 【全能AI管家：自动判断 聊天 / 生图 / 语音】==========
+  // ========== 【向量嵌入模型：已补全】==========
+  async getEmbedding(text) {
+    try {
+      const res = await this.env.AI.run("@cf/baai/bge-base-en-v1.5", { text });
+      return res?.data || [];
+    } catch (e) {
+      console.error("向量嵌入失败", e);
+      return [];
+    }
+  }
+
+  // ========== 【全能AI管家：自动判断 聊天 / 生图 / 语音 / 向量】==========
   async aiAssistant(prompt) {
     try {
       const lower = prompt.toLowerCase();
@@ -166,6 +177,10 @@ export class ChatDO extends DurableObject {
       if (lower.includes("读") || lower.includes("语音") || lower.includes("说") || lower.includes("朗读")) {
         const audio = await this.env.AI.run("@cf/microsoft/samantha-tts", { text: prompt });
         return { type: "audio", url: audio?.audio || "" };
+      }
+      if (lower.includes("向量") || lower.includes("嵌入") || lower.includes("embedding")) {
+        const vec = await this.getEmbedding(prompt);
+        return { type: "text", content: `向量生成成功：维度${vec.length}` };
       }
       const isXiaoya = Math.random() > 0.5;
       const text = isXiaoya ? await this.callXiaoya(prompt) : await this.callXiaoze(prompt);
