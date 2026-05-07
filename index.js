@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+ import { DurableObject } from "cloudflare:workers";
 
 // ========== 【你原配置，一字不动】==========
 const D1_BIND = "MY_MMM";
