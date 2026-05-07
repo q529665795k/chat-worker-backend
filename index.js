@@ -1,4 +1,4 @@
- import { DurableObject } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers";
 
 // ========== 环境绑定（和你原配置完全一致，一字不动）==========
 const D1_BIND = "MY_MMM";
@@ -8,6 +8,19 @@ const DO_BIND = "ChatDO";
 const FRONTEND_DOMAIN = "https://im6.qzz.io";
 // 新增：对方离线超时判定（30分钟，和前端5分钟心跳匹配）
 const PARTNER_TIMEOUT = 1800000;
+
+// ========== 固定模型&人设配置【定型不改】==========
+const AI_CHAT_MODEL = "qwen2.5-1.5b-instruct";
+const AI_EMBED_MODEL = "bge-base-en-v1.5";
+// 小雅人设
+const XIAOYA_SYS_PROMPT = "你叫小雅，性格温柔细腻、共情暖心、善于倾听，说话语气柔软文静、走心体贴，情商高，聊天接地气不浮夸，简短自然回复。";
+// 小泽人设
+const XIAOZE_SYS_PROMPT = "你叫小泽，性格开朗活泼、直爽幽默、爱唠嗑有点调皮，喜欢带动聊天气氛，说话接地气、轻松随性，简短自然回复。";
+// 双AI自聊间隔 15秒
+const AI_CHAT_INTERVAL = 15000;
+// 用户AI聊天KV过期 7天 const USER_AI_TTL = 604800;
+// 圆桌历史取最近50条
+const AI_ROOM_LIMIT = 50;
 
 // ========== 核心Durable Object（原逻辑100%保留，仅修复匹配互斥+重连逻辑）==========
 export class ChatDO extends DurableObject {
@@ -25,7 +38,16 @@ export class ChatDO extends DurableObject {
     this.usernameToSocket = new Map();
     this.milestones = [2, 10, 100, 1000, 5000, 10000];
     this.triggeredMilestones = new Set();
+
+    // 新增：AI圆桌相关
+    this.aiRoundTimer = null;
+    this.aiRoundChatList = [];
+    this.aiLastSpeaker = "xiaoya";
+    this.aiRoomPause = false;
+
     this.initOnlineCount();
+    // 启动后台24小时双AI自聊
+    this.startAiRoundAutoChat();
   }
 
   // ========== CORS跨域处理（分离部署必加，已内置）==========
@@ -92,8 +114,124 @@ export class ChatDO extends DurableObject {
     });
   }
 
+  // ========== 新增：KV分类存储方法 ==========
+  // 保存用户<->AI聊天 带7天过期
+  async saveUserAiChat(uid, content, fromName, toName) {
+    const key = `user_ai_chat_${Date.now()}_${uid}`;
+    const data = JSON.stringify({ uid, content, fromName, toName, time: Date.now() });
+    await this.env[KV_BIND].put(key, data, { expirationTtl: USER_AI_TTL });
+  }
+
+  // 保存AI<->AI自聊 永久不过期
+  async saveAiSelfChat(content, speaker) {
+    const key = `ai_self_chat_${Date.now()}_${speaker}`;
+    const data = JSON.stringify({ content, speaker, time: Date.now() });
+    await this.env[KV_BIND].put(key, data);
+    this.aiRoundChatList.unshift(data);
+    // 只保留最近100条内存缓存
+    if (this.aiRoundChatList.length > 100) this.aiRoundChatList.pop();
+  }
+
+  // 获取AI圆桌最近50条
+  async getAiRoomRecent50() {
+    const list = await this.env[KV_BIND].list({ prefix: "ai_self_chat_" });
+    const keys = list.keys.sort((a, b) => b.name.localeCompare(a.name)).slice(0, AI_ROOM_LIMIT);
+    const res = [];
+    for (let k of keys) {
+      const val = await this.env[KV_BIND].get(k.name);
+      if (val) res.push(JSON.parse(val));
+    }
+    return res.reverse();
+  }
+
+  // ========== 新增：Workers AI 原生调用 ==========
+  async runAiModel(sysPrompt, userPrompt) {
+    const messages = [
+      { role: "system", content: sysPrompt },
+      { role: "user", content: userPrompt }
+    ];
+    const res = await this.env.AI.run(AI_CHAT_MODEL, { messages });
+    return res?.response || "我暂时不知道怎么接话啦~";
+  }
+
+  // 调用小雅
+  async callXiaoya(prompt) {
+    return await this.runAiModel(XIAOYA_SYS_PROMPT, prompt);
+  }
+
+  // 调用小泽
+  async callXiaoze(prompt) {
+    return await this.runAiModel(XIAOZE_SYS_PROMPT, prompt);
+  }
+
+  // ========== 新增：后台24小时双AI自动圆桌自聊 ==========
+  startAiRoundAutoChat() {
+    if (this.aiRoundTimer) return;
+    this.aiRoundTimer = this.state.storage.setAlarm(Date.now() + AI_CHAT_INTERVAL);
+  }
+
+  async alarm() {
+    // 被用户插嘴暂停则跳过
+    if (this.aiRoomPause) {
+      this.aiRoundTimer = this.state.storage.setAlarm(Date.now() + AI_CHAT_INTERVAL);
+      return;
+    }
+
+    let lastContent = "你好呀，今天聊点什么好呢？";
+    if (this.aiRoundChatList.length > 0) {
+      lastContent = JSON.parse(this.aiRoundChatList[0]).content;
+    }
+
+    let currSpeaker, reply;
+    if (this.aiLastSpeaker === "xiaoya") {
+      currSpeaker = "xiaoze";
+      reply = await this.callXiaoze(lastContent);
+    } else {
+      currSpeaker = "xiaoya";
+      reply = await this.callXiaoya(lastContent);
+    }
+
+    this.aiLastSpeaker = currSpeaker;
+    const speakerName = currSpeaker === "xiaoya" ? "小雅" : "小泽";
+    // 存入永久KV
+    await this.saveAiSelfChat(reply, speakerName);
+
+    // 广播给所有在AI圆桌房的用户实时刷新
+    this.broadcastAiRoundMsg({ content: reply, speaker: speakerName, time: Date.now() });
+
+    // 继续下一轮定时
+    this.aiRoundTimer = this.state.storage.setAlarm(Date.now() + AI_CHAT_INTERVAL);
+  }
+
+  // 广播AI圆桌实时消息
+  broadcastAiRoundMsg(msgData) {
+    this.userMap.forEach((user) => {
+      if (user.socket && user.socket.readyState === WebSocket.OPEN) {
+        user.socket.send(JSON.stringify({
+          type: "ai_round_new_msg",
+          data: msgData
+        }));
+      }
+    });
+  }
+
+  // 暂停/恢复AI自聊（用户插嘴触发）
+  pauseAiRound() {
+    this.aiRoomPause = true;
+  }
+
+  resumeAiRound() {
+    this.aiRoomPause = false;
+  }
+
   // ========== HTTP请求分发（纯后端路由，无前端返回）==========
   async fetch(request) {
+    // 适配DurableObject闹钟
+    if (request.method === "POST" && new URL(request.url).pathname === "/__alarm") {
+      await this.alarm();
+      return new Response("ok");
+    }
+
     if (request.method === "OPTIONS") {
       return this.handleOptions();
     }
@@ -126,6 +264,13 @@ export class ChatDO extends DurableObject {
     if (url.pathname === "/upload") {
       const res = await this.handleUpload(request);
       return this.addCorsHeaders(res);
+    }
+    // 新增：获取AI圆桌最近50条历史接口
+    if (url.pathname === "/api/ai_round_history") {
+      const list = await this.getAiRoomRecent50();
+      return this.addCorsHeaders(new Response(JSON.stringify({ code:200, list }), {
+        headers: { "Content-Type":"application/json" }
+      }));
     }
 
     return this.addCorsHeaders(new Response("API Service Running", { status: 200 }));
@@ -275,7 +420,8 @@ export class ChatDO extends DurableObject {
       lastKeepAlive: Date.now(),
       roomId: null,
       inRoomId: null,
-      roomType: null
+      roomType: null,
+      inAiRoundRoom: false
     };
     this.userMap.set(sid, user);
 
@@ -293,13 +439,26 @@ export class ChatDO extends DurableObject {
           this.autoJoinMatchPool(sid);
         }
 
+        // 新增：进入AI圆桌房标记
+        if (data.type === "enter_ai_round_room") {
+          user.inAiRoundRoom = true;
+          // 用户进房自动恢复AI自聊
+          this.resumeAiRound();
+          return;
+        }
+        // 新增：退出AI圆桌房标记
+        if (data.type === "leave_ai_round_room") {
+          user.inAiRoundRoom = false;
+          return;
+        }
+
         // ===================== 【修复1：match_reset 彻底清空状态】 =====================
         if (data.type === "match_reset") {
           this.cleanMatchTimer(sid);
-          this.waitingUsers.delete(sid); // 关键修复：从队列删除
+          this.waitingUsers.delete(sid);
           this.stopChat(sid, true);
-          user.isMatched = false; // 关键修复：重置匹配状态
-          user.inRoomId = null;   // 关键修复：清空房间锁
+          user.isMatched = false;
+          user.inRoomId = null;
           return;
         }
 
@@ -307,13 +466,11 @@ export class ChatDO extends DurableObject {
         if (data.type === "match-chat") {
           if (!user.username) return;
           
-          // 彻底清空旧状态
           this.cleanMatchTimer(sid);
           this.waitingUsers.delete(sid);
           user.isMatched = false;
           user.inRoomId = null;
 
-          // 重新加入匹配
           this.waitingUsers.add(sid);
           const timer = setTimeout(() => this.assignAiRobot(sid), 15000);
           this.userMatchTimer.set(sid, timer);
@@ -338,8 +495,42 @@ export class ChatDO extends DurableObject {
           const partner = this.userMap.get(user.partner);
           const fromNick = this.loginMap.get(user.username)?.nickname || user.username;
           
+          // 新增：AI圆桌房用户插嘴
+          if(user.inAiRoundRoom && data.msgType === "text"){
+            // 真人发言暂停AI轮询
+            this.pauseAiRound();
+            // 保存用户与AI聊天 7天自动清理
+            await this.saveUserAiChat(user.username, data.content, fromNick, "AI圆桌");
+            // 触发AI随机或指定回复
+            let aiReply;
+            if(data.content.includes("@小雅")){
+              aiReply = await this.callXiaoya(data.content);
+            }else if(data.content.includes("@小泽")){
+              aiReply = await this.callXiaoze(data.content);
+            }else{
+              // 随机选一个回复
+              const rand = Math.random() > 0.5;
+              aiReply = rand ? await this.callXiaoya(data.content) : await this.callXiaoze(data.content);
+            }
+            // 15秒无新消息恢复自聊
+            setTimeout(()=>{
+              this.resumeAiRound();
+            }, AI_CHAT_INTERVAL);
+
+            client.send(JSON.stringify({
+              type: "new-msg",
+              content: aiReply,
+              fromName: "AI助手",
+              burn: false,
+              msgId: Date.now().toString(),
+              msgType: "text"
+            }));
+            return;
+          }
+
           if (user.partner === "ai_bot" && data.msgType === "text") {
-            const aiReply = await this.callAI(data.content);
+            // 替换为原生Workers AI调用
+            const aiReply = await this.runAiModel("你是温柔的AI陪伴者，简短贴心回复。", data.content);
             setTimeout(() => {
               if (client.readyState === WebSocket.OPEN) {
                 client.send(JSON.stringify({
@@ -385,24 +576,23 @@ export class ChatDO extends DurableObject {
           client.send(JSON.stringify({ type: "clear-chat-record" }));
         }
 
-       // ========== 新增：切回前台检查（只单发，不广播，省Worker） ==========
-if (data.type === "i_am_back") {
-  if (!user.isMatched || !user.partner || !user.roomId) return;
+        // ========== 新增：切回前台检查 ==========
+        if (data.type === "i_am_back") {
+          if (!user.isMatched || !user.partner || !user.roomId) return;
 
-  const partner = this.userMap.get(user.partner);
-  const isPartnerOffline = !partner || (Date.now() - partner.lastActive > PARTNER_TIMEOUT);
+          const partner = this.userMap.get(user.partner);
+          const isPartnerOffline = !partner || (Date.now() - partner.lastActive > PARTNER_TIMEOUT);
 
-  if (isPartnerOffline) {
-    this.stopChat(user.id, false);
+          if (isPartnerOffline) {
+            this.stopChat(user.id, false);
 
-    // ✅ 只发给自己，不广播
-    user.socket.send(JSON.stringify({
-      type: "self_tips",
-      content: "对方已离线，已为你重置匹配"
-    }));
-  }
-  return;
-}
+            user.socket.send(JSON.stringify({
+              type: "self_tips",
+              content: "对方已离线，已为你重置匹配"
+            }));
+          }
+          return;
+        }
 
       } catch (err) {
         console.error("WS消息处理失败：", err);
@@ -426,34 +616,34 @@ if (data.type === "i_am_back") {
   }
 
   // ========== AI调用/匹配逻辑/房间管理（已修复）==========
-async callAI(prompt) {
-  try {
-    const res = await fetch("https://nihilismlll-longg.hf.space/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        model: "Qwen/Qwen2-1.5B-Instruct", 
-        messages: [{ role: "user", content: prompt }], 
-        stream: false 
-      }),
-      signal: AbortSignal.timeout(15000)
-    });
-    if (!res.ok) throw new Error("AI接口响应异常");
-    const data = await res.json();
-    return data.message?.content || "爸爸～在呢😘";
-  } catch (e) {
-    console.error("AI调用失败：", e);
-    return "爸爸～我掉线啦🥺";
+  // 原外部HF调用方法废弃保留，不再使用
+  async callAI(prompt) {
+    try {
+      const res = await fetch("https://nihilismlll-longg.hf.space/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          model: "Qwen/Qwen2-1.5B-Instruct", 
+          messages: [{ role: "user", content: prompt }], 
+          stream: false 
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!res.ok) throw new Error("AI接口响应异常");
+      const data = await res.json();
+      return data.message?.content || "爸爸～在呢😘";
+    } catch (e) {
+      console.error("AI调用失败：", e);
+      return "爸爸～我掉线啦🥺";
+    }
   }
-}
 
-createMatchRoom(userA, userB) {
-  const roomId = `room_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-  this.roomMem.set(roomId, { userA, userB, userALeft: false, userBLeft: false, createTime: Date.now() });
-  setTimeout(() => this.roomMem.delete(roomId), 7200 * 1000);
-  return roomId;
-}
-
+  createMatchRoom(userA, userB) {
+    const roomId = `room_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    this.roomMem.set(roomId, { userA, userB, userALeft: false, userBLeft: false, createTime: Date.now() });
+    setTimeout(() => this.roomMem.delete(roomId), 7200 * 1000);
+    return roomId;
+  }
 
   // ===================== 【修复3：stopChat 彻底重置】 =====================
   stopChat(sid, isInitiative = true) {
@@ -461,7 +651,7 @@ createMatchRoom(userA, userB) {
     if (!me) return;
     
     this.cleanMatchTimer(sid);
-    this.waitingUsers.delete(sid); // 关键修复
+    this.waitingUsers.delete(sid);
     
     if (me.partner && me.partner !== "ai_bot") {
       const partner = this.userMap.get(me.partner);
@@ -474,7 +664,6 @@ createMatchRoom(userA, userB) {
       }
     }
 
-    // 彻底清空自己状态
     me.partner = null;
     me.isMatched = false;
     me.inRoomId = null;
@@ -522,7 +711,6 @@ createMatchRoom(userA, userB) {
     const u = this.userMap.get(sid);
     if (!u || !u.socket || !u.username) return;
     
-    // 关键修复：只要空闲就允许进池
     if (u.isMatched || u.inRoomId) return;
     
     this.waitingUsers.delete(sid);
