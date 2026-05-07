@@ -431,7 +431,7 @@ if (data.type === "i_am_back") {
       const res = await fetch("https://nihilismlll-longg.hf.space/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "Qwen/Qwen2-1.8B-Instruct, messages: [{ role: "user", content: prompt }], stream: false }),
+        body: JSON.stringify({ model: "Qwen/Qwen2-1.5B-Instruct, messages: [{ role: "user", content: prompt }], stream: false }),
         signal: AbortSignal.timeout(15000)
       });
       if (!res.ok) throw new Error("AI接口响应异常");
