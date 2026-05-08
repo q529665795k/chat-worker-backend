@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 
-// ========== 原配置不动 ==========
+// ========== 配置区 ==========
 const D1_BIND = "MY_MMM";
 const KV_BIND = "bbb";
 const DO_BIND = "ChatDO";
@@ -16,7 +16,7 @@ const AI_ROOM_LIMIT = 50;
 const XIAOYA_SYS_PROMPT = "你叫小雅，性格温柔细腻、共情暖心、善于倾听，说话语气柔软文静、走心体贴，情商高，聊天接地气不浮夸，简短自然回复。";
 const XIAOZE_SYS_PROMPT = "你叫小泽，性格开朗活泼、直爽幽默、爱唠嗑有点调皮，喜欢带动聊天气氛，说话接地气、轻松随性，简短自然回复。";
 
-// ========== Durable Object 纯净无重复版 ==========
+// ========== Durable Object 核心 ==========
 export class ChatDO extends DurableObject {
   constructor(state, env) {
     super(state, env);
@@ -36,7 +36,9 @@ export class ChatDO extends DurableObject {
     this.aiLastSpeaker = "xiaoya";
     this.aiRoomPause = false;
     this.initOnlineCount();
-    this.startAutoKickTimer();
+    if (this.ctx?.setInterval) {
+      this.startAutoKickTimer();
+    }
   }
 
   startAutoKickTimer() {
@@ -57,8 +59,10 @@ export class ChatDO extends DurableObject {
       if (this.usernameToSocket.has(u.username)) {
         const ws = this.usernameToSocket.get(u.username);
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "force_logout", msg: "1小时无操作，已自动下线" }));
-          ws.close(1000, "timeout_auto_logout");
+          try {
+            ws.send(JSON.stringify({ type: "force_logout", msg: "1小时无操作，已自动下线" }));
+            ws.close(1000, "timeout_auto_logout");
+          } catch (e) {}
         }
       }
       this.userSessionMap.delete(u.username);
@@ -75,8 +79,10 @@ export class ChatDO extends DurableObject {
     if (results.length === 0) return false;
     const dbSession = results[0].login_session;
     if (!dbSession) {
-      clientWs.send(JSON.stringify({ type: "force_logout", msg: "账号已在其他设备登录，你已被挤下线" }));
-      clientWs.close(1000, "login_kick_out");
+      try {
+        clientWs.send(JSON.stringify({ type: "force_logout", msg: "账号已在其他设备登录，你已被挤下线" }));
+        clientWs.close(1000, "login_kick_out");
+      } catch (e) {}
       return false;
     }
 
@@ -103,6 +109,7 @@ export class ChatDO extends DurableObject {
         "Access-Control-Allow-Origin": FRONTEND_DOMAIN,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Credentials": "true",
         "Access-Control-Max-Age": "86400",
       },
     });
@@ -403,6 +410,87 @@ export class ChatDO extends DurableObject {
           await this.env[D1_BIND].prepare(
             "UPDATE users SET last_active_ts = ? WHERE username = ?"
           ).bind(Date.now(), user.username).run();
+
+          const partner = this.userMap.get(user.partner);
+          const fromNick = this.loginMap.get(user.username)?.nickname || user.username;
+
+          if (user.inAiRoundRoom && data.msgType === "text") {
+            this.pauseAiRound();
+            await this.saveUserAiChat(user.username, data.content, fromNick, "AI圆桌");
+            let aiReply;
+            if (data.content.includes("@小雅")) {
+              aiReply = await this.callXiaoya(data.content);
+            } else if (data.content.includes("@小泽")) {
+              aiReply = await this.callXiaoze(data.content);
+            } else {
+              aiReply = Math.random() > 0.5 ? await this.callXiaoya(data.content) : await this.callXiaoze(data.content);
+            }
+            setTimeout(() => this.resumeAiRound(), AI_CHAT_INTERVAL);
+            client.send(JSON.stringify({
+              type: "new-msg",
+              content: aiReply,
+              fromName: "AI助手",
+              burn: false,
+              msgId: Date.now().toString(),
+              msgType: "text"
+            }));
+            return;
+          }
+
+          if (user.partner === "ai_bot" && data.msgType === "text") {
+            try {
+              const result = await this.aiAssistant(data.content);
+              if (result.type === "text") {
+                client.send(JSON.stringify({
+                  type: "new-msg",
+                  content: result.content,
+                  fromName: "AI陪伴者",
+                  burn: false,
+                  msgId: Date.now().toString(),
+                  msgType: "text"
+                }));
+              } else if (result.type === "image") {
+                client.send(JSON.stringify({
+                  type: "new-msg",
+                  content: result.url,
+                  fromName: "AI陪伴者",
+                  burn: false,
+                  msgId: Date.now().toString(),
+                  msgType: "image"
+                }));
+              } else if (result.type === "audio") {
+                client.send(JSON.stringify({
+                  type: "new-msg",
+                  content: result.url,
+                  fromName: "AI陪伴者",
+                  burn: false,
+                  msgId: Date.now().toString(),
+                  msgType: "audio"
+                }));
+              }
+            } catch (err) {
+              client.send(JSON.stringify({
+                type: "new-msg",
+                content: "我出错啦，再试一次~",
+                fromName: "AI陪伴者",
+                burn: false,
+                msgId: Date.now().toString(),
+                msgType: "text"
+              }));
+            }
+            return;
+          }
+
+          if (partner && partner.socket && partner.socket.readyState === WebSocket.OPEN) {
+            partner.socket.send(JSON.stringify({
+              type: "new-msg",
+              content: data.content,
+              fromName: fromNick,
+              burn: data.burn || false,
+              msgId: data.msgId || "",
+              msgType: data.msgType || "text"
+            }));
+          }
         }
 
         if (data.type === "enter_ai_round_room") {
