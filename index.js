@@ -6,9 +6,10 @@ const KV_BIND = "bbb";
 const DO_BIND = "ChatDO";
 const FRONTEND_DOMAIN = "https://im6.qzz.io";
 const PARTNER_TIMEOUT = 1800000;
+const ONE_HOUR_MS = 3600000;
 
 // ========== 【必须定义的常量】==========
-const AI_CHAT_MODEL = "@cf/qwen/qwen1.5-1.8b-chat";
+const AI_CHAT_MODEL = "@cf/qwen/qwen1.8b-chat";
 const USER_AI_TTL = 604800;
 const AI_CHAT_INTERVAL = 15000;
 const AI_ROOM_LIMIT = 50;
@@ -37,6 +38,65 @@ export class ChatDO extends DurableObject {
     this.aiLastSpeaker = "xiaoya";
     this.aiRoomPause = false;
     this.initOnlineCount();
+    // 定时轮询：自动检测1小时无操作账号并强制踢下线
+    this.startAutoKickTimer();
+  }
+
+  // 定时任务：每分钟检测一次超时用户
+  startAutoKickTimer() {
+    this.ctx.setInterval(() => this.autoKickOfflineUser(), 60000);
+  }
+
+  // 自动踢下线：1小时无操作强制清会话、掉线
+  async autoKickOfflineUser() {
+    const now = Date.now();
+    const { results } = await this.env[D1_BIND].prepare(
+      "SELECT username FROM users WHERE last_active_ts > 0 AND (? - last_active_ts) > ?"
+    ).bind(now, ONE_HOUR_MS).all();
+
+    for (const u of results) {
+      // 清空会话，让登录态失效
+      await this.env[D1_BIND].prepare(
+        "UPDATE users SET login_session = NULL, last_active_ts = 0 WHERE username = ?"
+      ).bind(u.username).run();
+
+      // 关闭对应WebSocket连接，强制下线
+      if (this.usernameToSocket.has(u.username)) {
+        const ws = this.usernameToSocket.get(u.username);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "force_logout", msg: "1小时无操作，已自动下线" }));
+          ws.close(1000, "timeout_auto_logout");
+        }
+      }
+      // 清理本地映射
+      this.userSessionMap.delete(u.username);
+      this.usernameToSocket.delete(u.username);
+    }
+  }
+
+  // 校验会话 + 刷新活跃时间（互踢+续活核心）
+  async checkAndRefreshSession(username, clientWs) {
+    const now = Date.now();
+    const { results } = await this.env[D1_BIND].prepare(
+      "SELECT login_session FROM users WHERE username = ?"
+    ).bind(username).all();
+
+    if (results.length === 0) return false;
+    const dbSession = results[0].login_session;
+
+    // 会话为空 = 已被其他端挤下线
+    if (!dbSession) {
+      clientWs.send(JSON.stringify({ type: "force_logout", msg: "账号已在其他设备登录，你已被挤下线" }));
+      clientWs.close(1000, "login_kick_out");
+      return false;
+    }
+
+    // 刷新最后活跃时间
+    await this.env[D1_BIND].prepare(
+      "UPDATE users SET last_active_ts = ? WHERE username = ?"
+    ).bind(now, username).run();
+
+    return true;
   }
 
   // ========== CORS 已修复 100% 不报错 ==========
@@ -246,13 +306,13 @@ export class ChatDO extends DurableObject {
     if (exist.results.length > 0) {
       return new Response(JSON.stringify({ code: 400, msg: "用户名已被注册" }), { headers: { "Content-Type": "application/json" } });
     }
-    await this.env[D1_BIND].prepare("INSERT INTO users (username,password,nickname) VALUES (?,?,?)").bind(username, password, username).run();
+    await this.env[D1_BIND].prepare("INSERT INTO users (username,password,nickname,login_session,last_active_ts) VALUES (?,?,?,NULL,0)").bind(username, password, username).run();
     await this.env[D1_BIND].prepare("INSERT INTO register_logs (username,password) VALUES (?,?)").bind(username, password).run();
     this.loginMap.set(username, { nickname: username, password });
     return new Response(JSON.stringify({ code: 200, msg: "注册成功", data: { username, nickname: username } }), { headers: { "Content-Type": "application/json" } });
   }
 
-  // ========== 登录 ==========
+  // ========== 登录（已改：多端互踢 + 生成唯一会话）==========
   async handleLogin(request) {
     await this.initDB();
     const body = await request.json();
@@ -264,11 +324,23 @@ export class ChatDO extends DurableObject {
     if (user.results[0].password !== password) {
       return new Response(JSON.stringify({ code: 400, msg: "密码错误" }), { headers: { "Content-Type": "application/json" } });
     }
+
+    // 生成新会话，覆盖旧会话 → 自动挤掉其他端登录
+    const newSession = crypto.randomUUID();
+    const now = Date.now();
+    await this.env[D1_BIND].prepare(`
+      UPDATE users 
+      SET login_session = ?, last_active_ts = ? 
+      WHERE username = ?
+    `).bind(newSession, now, username).run();
+
     await this.env[D1_BIND].prepare("INSERT INTO login_logs (username) VALUES (?)").bind(username).run();
     this.loginMap.set(username, { nickname: user.results[0].nickname, password: user.results[0].password });
+
     return new Response(JSON.stringify({
       code: 200,
       msg: "登录成功",
+      session: newSession,
       data: { username: user.results[0].username, nickname: user.results[0].nickname }
     }), { headers: { "Content-Type": "application/json" } });
   }
@@ -341,11 +413,35 @@ export class ChatDO extends DurableObject {
           const { username } = data;
           if (!username || !this.loginMap.has(username)) return;
           user.username = username;
+
+          // 校验会话，被挤下线直接断开
+          const valid = await this.checkAndRefreshSession(username, client);
+          if (!valid) return;
+
           this.userSessionMap.set(username, sid);
           this.usernameToSocket.set(username, client);
           await this.changeOnlineCount(1);
           this.broadcastSystemMsg(`👋 ${this.loginMap.get(username).nickname} 进入摸鱼基地`);
           this.autoJoinMatchPool(sid);
+        }
+
+        // 心跳：刷新活跃时间，防止1小时被踢
+        if (data.type === "HEARTBEAT") {
+          if (!user.username) return;
+          user.lastKeepAlive = Date.now();
+          user.lastActive = Date.now();
+          // 刷新数据库活跃时间
+          await this.env[D1_BIND].prepare(
+            "UPDATE users SET last_active_ts = ? WHERE username = ?"
+          ).bind(Date.now(), user.username).run();
+          client.send(JSON.stringify({ type: "HEARTBEAT-ACK" }));
+        }
+
+        // 发消息也刷新活跃时间
+        if (data.type === "send-msg" && user.username) {
+          await this.env[D1_BIND].prepare(
+            "UPDATE users SET last_active_ts = ? WHERE username = ?"
+          ).bind(Date.now(), user.username).run();
         }
 
         if (data.type === "enter_ai_round_room") {
@@ -384,97 +480,6 @@ export class ChatDO extends DurableObject {
           this.waitingUsers.delete(sid);
           this.cleanMatchTimer(sid);
           this.stopChat(sid, true);
-        }
-
-        if (data.type === "HEARTBEAT") {
-          if (!user.username) return;
-          user.lastKeepAlive = Date.now();
-          user.lastActive = Date.now();
-          client.send(JSON.stringify({ type: "HEARTBEAT-ACK" }));
-        }
-
-        if (data.type === "send-msg") {
-          if (!user.username || !user.isMatched || !user.partner) return;
-          const partner = this.userMap.get(user.partner);
-          const fromNick = this.loginMap.get(user.username)?.nickname || user.username;
-
-          if (user.inAiRoundRoom && data.msgType === "text") {
-            this.pauseAiRound();
-            await this.saveUserAiChat(user.username, data.content, fromNick, "AI圆桌");
-            let aiReply;
-            if (data.content.includes("@小雅")) {
-              aiReply = await this.callXiaoya(data.content);
-            } else if (data.content.includes("@小泽")) {
-              aiReply = await this.callXiaoze(data.content);
-            } else {
-              aiReply = Math.random() > 0.5 ? await this.callXiaoya(data.content) : await this.callXiaoze(data.content);
-            }
-            setTimeout(() => this.resumeAiRound(), AI_CHAT_INTERVAL);
-            client.send(JSON.stringify({
-              type: "new-msg",
-              content: aiReply,
-              fromName: "AI助手",
-              burn: false,
-              msgId: Date.now().toString(),
-              msgType: "text"
-            }));
-            return;
-          }
-
-          if (user.partner === "ai_bot" && data.msgType === "text") {
-            try {
-              const result = await this.aiAssistant(data.content);
-              if (result.type === "text") {
-                client.send(JSON.stringify({
-                  type: "new-msg",
-                  content: result.content,
-                  fromName: "AI陪伴者",
-                  burn: false,
-                  msgId: Date.now().toString(),
-                  msgType: "text"
-                }));
-              } else if (result.type === "image") {
-                client.send(JSON.stringify({
-                  type: "new-msg",
-                  content: result.url,
-                  fromName: "AI陪伴者",
-                  burn: false,
-                  msgId: Date.now().toString(),
-                  msgType: "image"
-                }));
-              } else if (result.type === "audio") {
-                client.send(JSON.stringify({
-                  type: "new-msg",
-                  content: result.url,
-                  fromName: "AI陪伴者",
-                  burn: false,
-                  msgId: Date.now().toString(),
-                  msgType: "audio"
-                }));
-              }
-            } catch (err) {
-              client.send(JSON.stringify({
-                type: "new-msg",
-                content: "我出错啦，再试一次~",
-                fromName: "AI陪伴者",
-                burn: false,
-                msgId: Date.now().toString(),
-                msgType: "text"
-              }));
-            }
-            return;
-          }
-
-          if (partner && partner.socket && partner.socket.readyState === WebSocket.OPEN) {
-            partner.socket.send(JSON.stringify({
-              type: "new-msg",
-              content: data.content,
-              fromName: fromNick,
-              burn: data.burn || false,
-              msgId: data.msgId || "",
-              msgType: data.msgType || "text"
-            }));
-          }
         }
 
         if (data.type === "msg-read") {
@@ -534,7 +539,7 @@ export class ChatDO extends DurableObject {
     return roomId;
   }
 
-    // ========== 匹配逻辑（修复双重匹配）==========
+  // ========== 匹配逻辑（修复双重匹配）==========
   stopChat(sid, isInitiative = true) {
     const me = this.userMap.get(sid);
     if (!me) return;
@@ -622,9 +627,8 @@ export class ChatDO extends DurableObject {
     }
   }
 
-  // ========== AI 回复（修复兜底，直接用固定文案测试）==========
+  // ========== AI 回复兜底 ==========
 async callAiReply(prompt) {
-  // 先判断AI是否绑定，防止报错
   if (!this.env.AI) {
     return "AI未绑定，只能陪你打个招呼啦~";
   }
@@ -633,16 +637,13 @@ async callAiReply(prompt) {
       { role: "system", content: "你是一个简短回复的聊天助手，说话接地气，不啰嗦，一句话以内回答。" },
       { role: "user", content: prompt }
     ];
-    // 官方稳定可用的模型名
     const res = await this.env.AI.run("@cf/qwen/qwen1.5-0.5b-chat", { messages });
     return res?.response || "我有点累了，稍后再聊吧~";
   } catch (e) {
     console.error("AI调用失败：", e);
-    // 改成固定测试文案，一眼就能定位问题
     return "调用AI失败，这是兜底回复：收到！";
   }
 }
-
 
   cleanMatchTimer(sid) {
     if (this.userMatchTimer.has(sid)) {
