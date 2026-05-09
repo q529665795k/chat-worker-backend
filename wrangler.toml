@@ -20,5 +20,10 @@ class_name = "ChatDO"
 tag = "v1"
 new_sqlite_classes = ["ChatDO"]
 
+
 [observability]
 enabled = false
+
+
+[ai]
+binding = "AI"
