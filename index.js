@@ -208,28 +208,90 @@ export class ChatDO extends DurableObject {
   }
 
   async aiAssistant(prompt) {
-    try {
-      const lower = prompt.toLowerCase();
-      if (lower.includes("画") || lower.includes("生图") || lower.includes("图片") || lower.includes("生成")) {
+  try {
+    // 第一步：用 Qwen 做意图识别
+    let intent = "chat"; // 默认闲聊
+
+    if (this.env.AI) {
+      try {
+        const intentResult = await this.env.AI.run("@cf/qwen/qwen1.5-0.5b-chat", {
+          messages: [
+            {
+              role: "system",
+              content: `你是一个意图识别器，只输出一个词。根据用户消息判断意图：
+- 如果用户想生成图片/画画/生图 → 输出: image
+- 如果用户想听语音/朗读/说话 → 输出: audio
+- 如果用户想写代码/编程/开发 → 输出: code
+- 如果用户想翻译/中译英/英译中 → 输出: translate
+- 其他所有情况（闲聊/情感/问答/日常） → 输出: chat
+只输出一个英文单词，不要输出任何其他内容。`
+            },
+            { role: "user", content: prompt }
+          ],
+          max_tokens: 10
+        });
+
+        const raw = (intentResult.response || "").trim().toLowerCase();
+
+        if (raw.includes("image")) intent = "image";
+        else if (raw.includes("audio")) intent = "audio";
+        else if (raw.includes("code")) intent = "code";
+        else if (raw.includes("translate")) intent = "translate";
+        else intent = "chat";
+
+      } catch (e) {
+        console.error("意图识别失败，降级为闲聊:", e);
+        intent = "chat";
+      }
+    }
+
+    // 第二步：根据意图路由到对应模型
+    switch (intent) {
+      case "image": {
         const image = await this.env.AI.run("@cf/bytedance/lumina-dreamscape", { prompt });
         return { type: "image", url: image?.image || "" };
       }
-      if (lower.includes("读") || lower.includes("语音") || lower.includes("说") || lower.includes("朗读")) {
+
+      case "audio": {
         const audio = await this.env.AI.run("@cf/microsoft/samantha-tts", { text: prompt });
         return { type: "audio", url: audio?.audio || "" };
       }
-      if (lower.includes("向量") || lower.includes("嵌入") || lower.includes("embedding")) {
-        const vec = await this.getEmbedding(prompt);
-        return { type: "text", content: `向量生成成功：维度${vec.length}` };
+
+      case "code": {
+        const codeResult = await this.env.AI.run("@cf/qwen/qwen1.5-1.8b-chat", {
+          messages: [
+            { role: "system", content: "你是一个专业的编程助手，帮助用户写代码、调试和解答技术问题。请用中文回复。" },
+            { role: "user", content: prompt }
+          ]
+        });
+        return { type: "text", content: codeResult.response || "代码生成失败，请重试~" };
       }
-      const isXiaoya = Math.random() > 0.5;
-      const text = isXiaoya ? await this.callXiaoya(prompt) : await this.callXiaoze(prompt);
-      return { type: "text", content: text };
-    } catch (e) {
-      console.error("AI助理异常", e);
-      return { type: "text", content: "我暂时无法处理哦，换个说法吧~" };
+
+      case "translate": {
+        const translateResult = await this.env.AI.run("@cf/qwen/qwen1.5-1.8b-chat", {
+          messages: [
+            { role: "system", content: "你是一个翻译专家，帮用户翻译各种语言。请直接输出翻译结果，不要解释。" },
+            { role: "user", content: prompt }
+          ]
+        });
+        return { type: "text", content: translateResult.response || "翻译失败，请重试~" };
+      }
+
+      case "chat":
+      default: {
+        // 闲聊情感陪伴 随机小雅/小泽
+        const isXiaoya = Math.random() > 0.5;
+        const text = isXiaoya ? await this.callXiaoya(prompt) : await this.callXiaoze(prompt);
+        return { type: "text", content: text };
+      }
     }
+
+  } catch (e) {
+    console.error("AI助理异常", e);
+    return { type: "text", content: "我暂时无法处理哦，换个说法吧~" };
   }
+}
+
 
   broadcastAiRoundMsg(msgData) {
     this.userMap.forEach((user) => {
