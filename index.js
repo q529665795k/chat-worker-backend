@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+ import { DurableObject } from "cloudflare:workers";
 
 // ========== 配置区 ==========
 const D1_BIND = "MY_MMM";
