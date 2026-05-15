@@ -4,7 +4,7 @@ import { DurableObject } from "cloudflare:workers";
 const D1_BIND = "MY_MMM";
 const KV_BIND = "bbb";
 const DO_BIND = "ChatDO";
-const FRONTEND_DOMAIN = "https://im6.qzz.io";
+const FRONTEND_DOMAIN = "https://808.qzz.io";
 const PARTNER_TIMEOUT = 1800000;
 const ONE_HOUR_MS = 3600000;
 
@@ -754,7 +754,7 @@ export class ChatDO extends DurableObject {
       if (!file) {
         return new Response(JSON.stringify({ error: "无文件" }), { status: 400, headers: { "Content-Type": "application/json" } });
       }
-      const uploadWorkerUrl = "https://b.im6.qzz.io/upload";
+      const uploadWorkerUrl = "https://b.808.qzz.io/upload";
       const forwardForm = new FormData();
       forwardForm.append("file", file);
       const res = await fetch(uploadWorkerUrl, {
