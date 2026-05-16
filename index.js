@@ -1,10 +1,12 @@
- import { DurableObject } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers";
 
-// ========== 配置区 ==========
+// ========== 配置区（新增密钥，务必修改！） ==========
 const D1_BIND = "MY_MMM";
 const KV_BIND = "bbb";
 const DO_BIND = "ChatDO";
 const FRONTEND_DOMAIN = "https://808.qzz.io";
+// 🔴 这里改成你自己的强密钥，前端请求头必须带 X-API-Secret: 你的密钥
+const API_SECRET = "Chat808_Secret_2026";
 const PARTNER_TIMEOUT = 1800000;
 const ONE_HOUR_MS = 3600000;
 
@@ -92,11 +94,20 @@ export class ChatDO extends DurableObject {
     return true;
   }
 
+  // 密码哈希加密（修复明文存储漏洞）
+  async hashPassword(password) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
+    const hash = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
   addCorsHeaders(response) {
     const newResponse = new Response(response.body, response);
     newResponse.headers.set("Access-Control-Allow-Origin", FRONTEND_DOMAIN);
     newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    newResponse.headers.set("Access-Control-Allow-Headers", "Content-Type");
+    // 新增鉴权头允许字段
+    newResponse.headers.set("Access-Control-Allow-Headers", "Content-Type,X-API-Secret");
     newResponse.headers.set("Access-Control-Allow-Credentials", "true");
     newResponse.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
     return newResponse;
@@ -108,7 +119,7 @@ export class ChatDO extends DurableObject {
       headers: {
         "Access-Control-Allow-Origin": FRONTEND_DOMAIN,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type,X-API-Secret",
         "Access-Control-Allow-Credentials": "true",
         "Access-Control-Max-Age": "86400",
       },
@@ -347,9 +358,11 @@ export class ChatDO extends DurableObject {
     if (exist.results.length > 0) {
       return new Response(JSON.stringify({ code: 400, msg: "用户名已被注册" }), { headers: { "Content-Type": "application/json" } });
     }
-    await this.env[D1_BIND].prepare("INSERT INTO users (username,password,nickname,login_session,last_active_ts) VALUES (?,?,?,NULL,0)").bind(username, password, username).run();
-    await this.env[D1_BIND].prepare("INSERT INTO register_logs (username,password) VALUES (?,?)").bind(username, password).run();
-    this.loginMap.set(username, { nickname: username, password });
+    // 密码哈希加密存储，不再明文
+    const passHash = await this.hashPassword(password);
+    await this.env[D1_BIND].prepare("INSERT INTO users (username,password,nickname,login_session,last_active_ts) VALUES (?,?,?,NULL,0)").bind(username, passHash, username).run();
+    await this.env[D1_BIND].prepare("INSERT INTO register_logs (username,password) VALUES (?,?)").bind(username, passHash).run();
+    this.loginMap.set(username, { nickname: username, password: passHash });
     return new Response(JSON.stringify({ code: 200, msg: "注册成功", data: { username, nickname: username } }), { headers: { "Content-Type": "application/json" } });
   }
 
@@ -361,7 +374,9 @@ export class ChatDO extends DurableObject {
     if (user.results.length === 0) {
       return new Response(JSON.stringify({ code: 400, msg: "账号不存在" }), { headers: { "Content-Type": "application/json" } });
     }
-    if (user.results[0].password !== password) {
+    // 哈希密码校验
+    const passHash = await this.hashPassword(password);
+    if (user.results[0].password !== passHash) {
       return new Response(JSON.stringify({ code: 400, msg: "密码错误" }), { headers: { "Content-Type": "application/json" } });
     }
 
@@ -374,7 +389,7 @@ export class ChatDO extends DurableObject {
     `).bind(newSession, now, username).run();
 
     await this.env[D1_BIND].prepare("INSERT INTO login_logs (username) VALUES (?)").bind(username).run();
-    this.loginMap.set(username, { nickname: user.results[0].nickname, password: user.results[0].password });
+    this.loginMap.set(username, { nickname: user.results[0].nickname, password: passHash });
 
     return new Response(JSON.stringify({
       code: 200,
@@ -772,8 +787,20 @@ export class ChatDO extends DurableObject {
   }
 }
 
+// ========== 全局入口：新增鉴权拦截，核心防护 ==========
 export default {
   async fetch(request, env) {
+    // 🔴 全局密钥鉴权，拦截所有外部爬虫/脚本调用
+    const authKey = request.headers.get("X-API-Secret");
+    const referer = request.headers.get("referer") || "";
+    const isFrontend = referer.startsWith(FRONTEND_DOMAIN);
+    const isOptions = request.method === "OPTIONS";
+
+    // 只有你的前端 或 带正确密钥 允许访问
+    if (!isFrontend && authKey !== API_SECRET && !isOptions) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
     const doId = env[DO_BIND].idFromName("global");
     const chatDO = env[DO_BIND].get(doId);
     return await chatDO.fetch(request);
