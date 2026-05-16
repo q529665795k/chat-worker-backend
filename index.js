@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+ import { DurableObject } from "cloudflare:workers";
 
 // ========== 配置区（新增密钥，务必修改！） ==========
 const D1_BIND = "MY_MMM";
